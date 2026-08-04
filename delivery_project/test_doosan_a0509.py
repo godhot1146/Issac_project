@@ -16,7 +16,7 @@ import os
 from isaacgym import gymapi, gymutil   # isaacgym 을 torch 보다 먼저 import
 
 # --- asset 경로 (프로젝트 공용 asset 폴더 기준) ---
-asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/isaac_assets")
+asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/Issac_asset/isaac_assets")
 asset_file = "urdf/doosan_a0509/a0509.urdf"
 
 # --- 인자 파싱 (--headless 는 커스텀으로 추가해야 함) ---

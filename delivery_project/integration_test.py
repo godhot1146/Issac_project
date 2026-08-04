@@ -25,7 +25,7 @@ plane_params.distance = -0.05
 gym.add_ground(sim, plane_params)
 
 # 3. 에셋 로드
-asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/isaac_assets")
+asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/Issac_asset/isaac_assets")
 env_opts = gymapi.AssetOptions()
 env_opts.fix_base_link = True
 room_size = 16.0

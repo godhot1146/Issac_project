@@ -20,7 +20,7 @@ from isaacgym import gymapi, gymutil
 # ============================================================================
 # 경로 설정 — 프로젝트 구조에 맞게 조정
 # ============================================================================
-ASSET_ROOT = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/isaac_assets")
+ASSET_ROOT = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/Issac_asset/isaac_assets")
 
 
 # ============================================================================

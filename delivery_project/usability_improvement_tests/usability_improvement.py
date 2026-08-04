@@ -38,7 +38,7 @@ gym.add_ground(sim, plane_params)
 # ============================================================================
 # [SECTION 2] 공장 레이아웃 (바닥/벽/기둥) 에셋 정의 및 환경 생성
 # ============================================================================
-asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/isaac_assets")
+asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/Issac_asset/isaac_assets")
 env_opts = gymapi.AssetOptions()
 env_opts.fix_base_link = True
 

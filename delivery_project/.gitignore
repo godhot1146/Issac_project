@@ -2,8 +2,8 @@
 __pycache__/
 *.py[cod]
 
-# Editor / IDE — VSCode IntelliSense DB (1GB+, must not be committed)
-.vscode/browse.vc.db
+# Editor / IDE — machine-specific settings & IntelliSense DB (contains absolute paths)
+.vscode/
 *.vc.db
 
 # OS

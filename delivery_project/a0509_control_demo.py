@@ -20,7 +20,7 @@ STIFFNESS = 600.0   # P게인: 클수록 목표에 강하게 붙음 (너무 크�
 DAMPING   = 50.0    # D게인: 클수록 부드럽게 감쇠 (너무 작으면 오버슈트/떨림)
 HOLD_SEC  = 2.0     # 각 목표 자세를 유지하는 시간(초)
 
-asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/isaac_assets")
+asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/Issac_asset/isaac_assets")
 asset_file = "urdf/doosan_a0509/a0509.urdf"
 
 custom = [{"name": "--headless", "action": "store_true", "help": "뷰어 없이"}]

@@ -23,7 +23,7 @@ plane_params.normal = gymapi.Vec3(0, 0, 1)
 gym.add_ground(sim, plane_params)
 
 # 3. 에셋 로드
-asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/isaac_assets")
+asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/Issac_asset/isaac_assets")
 franka_asset_file = "urdf/franka_description/robots/franka_panda.urdf"
 
 asset_options = gymapi.AssetOptions()

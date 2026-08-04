@@ -22,7 +22,7 @@ gym.add_ground(sim, plane_params)
 env = gym.create_env(sim, gymapi.Vec3(-3, -3, 0), gymapi.Vec3(3, 3, 3), 1)
 
 # 4. 에셋 로드 (4바퀴 URDF)
-asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/isaac_assets")
+asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/Issac_asset/isaac_assets")
 carter_asset = gym.load_asset(sim, asset_root, "urdf/carter/carter.urdf", gymapi.AssetOptions())
 
 # 로봇 소환
