@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor / IDE — VSCode IntelliSense DB (1GB+, must not be committed)
+.vscode/browse.vc.db
+*.vc.db
+
+# OS
+.DS_Store
+Thumbs.db
