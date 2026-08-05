@@ -1,0 +1,32 @@
+# ============================================================
+# requirements_for_this_project.txt
+# 이 프로젝트(delivery_project) 코드가 "실제로 import"하는 패키지만 정리.
+# (프로젝트 .py 전체를 스캔해 top-level import를 추출 → 내부 모듈/표준
+#  라이브러리를 제외하고, 활성 코드/Old_files 사용처를 구분한 결과)
+#
+# 검증 환경: Python 3.8.20 / conda / Ubuntu / CUDA 12.1
+#
+# ※ 여기 안 적힌 torchvision, pillow, imageio, ninja, 그리고 nvidia-*-cu12
+#    런타임 등은 아래 패키지 설치 시 pip이 자동으로 딸려온다(transitive).
+#    그래서 일부러 나열하지 않는다 — 직접 import하는 것만 남긴다.
+# ============================================================
+
+# --- 활성 시뮬레이션 코드가 직접 사용 (필수) ---
+#   numpy: 활성 16파일 / scipy: 4파일 / torch: 6파일
+numpy==1.24.4
+scipy==1.10.1
+torch==2.4.1
+
+# --- Old_files(아카이브: 지도 생성 A*, 시각화)에서만 사용 ---
+#   활성 시뮬레이션엔 불필요. 그 옛 스크립트도 돌릴 때만 주석 해제.
+#   cv2 → opencv-python, yaml → PyYAML
+# matplotlib==3.7.5
+# opencv-python==4.10.0.84
+# PyYAML==6.0.3
+
+# ============================================================
+# isaacgym 은 PyPI에 없는 NVIDIA 전용 패키지 → 이 파일로 설치 안 됨.
+#   별도로:  pip install -e ~/isaacgym/python
+#   (활성 코드 22파일이 import. torch/numpy/scipy 등 핵심 의존성도
+#    isaacgym setup.py가 함께 요구하므로 위 목록과 중복돼도 무방)
+# ============================================================

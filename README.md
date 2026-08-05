@@ -5,6 +5,8 @@ Isaac Gym 기반 물류/딜리버리 시뮬레이션 프로젝트. AMR·포크�
 
 에셋(URDF·메쉬·텍스처)은 용량이 커서 **별도 저장소**로 분리되어 있다 → [Issac_asset](https://github.com/godhot1146/Issac_asset)
 
+프로젝트 파일 구성과 모듈 동작 흐름은 [delivery_project/설명 문서/ARCHITECTURE.md](delivery_project/설명%20문서/ARCHITECTURE.md) 참고.
+
 ---
 
 ## 1. 요구 환경
@@ -45,10 +47,13 @@ export ISAAC_ASSETS=/절대경로/Issac_asset/isaac_assets
 
 ```bash
 cd delivery_project
-python warehouse_environment_2.py     # 창고 통합 환경
-python integration_test.py            # 통합 테스트
-python carter_test.py                 # 단일 에셋 로드 확인
+python run.py                    # 창고 통합 환경 (메인)
+python demos/integration_test.py # 통합 테스트
+python demos/carter_test.py      # 단일 에셋 로드 확인
 ```
+
+> 제어 모듈은 `controllers/`, 개별 데모는 `demos/`에 있다. 각 스크립트가 `controllers/`를
+> import 경로에 자동 추가하므로 위치만 옮겨도 그대로 실행된다.
 
 ---
 

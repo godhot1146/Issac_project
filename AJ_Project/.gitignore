@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor / IDE — machine-specific settings & IntelliSense DB (contains absolute paths)
+.vscode/
+*.vc.db
+
+# OS
+.DS_Store
+Thumbs.db
