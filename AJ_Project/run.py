@@ -1,121 +1,161 @@
 """
-run.py  (최소 구성 — 조립 전용)
-두산 A0509 한 대를 바닥에 놓고 좌표 웨이포인트를 순회시킨다.
+run.py — 두산 A0509 키보드 다중모드 제어 (JSC / TSC / OSC)
 
-제어 로직(에셋 로드·스폰·DOF 제어·IK)은 전부 controllers/doosan_a0509_controller.py
-안에 있고, 여기서는 "무대(sim·env) 준비 → 팔 배치 → 좌표 시퀀스 선언 → 루프"만 한다.
+씬: 선반(고정) + A0509 팔(선반 상단 z=0.8에 고정 장착) + 에어 컴프레셔(선반 안).
+제어: 실행 중 키로 모드를 바꿔가며 직접 조작.
 
-실행:
-  conda activate issac_env
-  cd ~/Desktop/Issac_project/AJ_Project
-  python run.py
+  ┌─────────────── 키 맵 ───────────────┐
+  │ [모드]  1: JSC(관절)  2: TSC(좌표+IK)  3: OSC(좌표+동역학)
+  │ [좌표이동 · TSC/OSC]  W/S: X±   A/D: Y±   Q/E: Z±
+  │ [관절이동 · JSC]      J/L: 관절 선택   U/O: 선택관절 각도±
+  │ [공통]  R: 홈 자세    (뷰어 창 닫기: 종료)
+  └──────────────────────────────────────┘
+
+제어 로직은 controllers/doosan_controller.py (JSC/TSC/OSC 통합).
+좌표 목표는 '로봇 베이스 기준'. OSC는 월드 텐서를 쓰므로 장착높이(+0.8) 보정해 넘긴다.
+
+실행:  conda activate issac_env  &&  python run.py     (OSC용 gymtorch→ninja 필요)
 """
 import os
 import sys
 import numpy as np
-from isaacgym import gymapi, gymutil
+from isaacgym import gymapi, gymutil   # torch보다 먼저
 
-# 제어 모듈은 controllers/ 폴더에 있으므로 import 경로에 추가
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "controllers"))
-from doosan_a0509_controller import DoosanA0509Controller
+from doosan_controller import DoosanController
 
-# 에셋 경로 (다른 PC면 ISAAC_ASSETS 환경변수로 지정)
 asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/Issac_asset/isaac_assets")
 
-HOLD_SEC = 2.5   # 각 좌표 웨이포인트를 유지하는 시간(초)
+BASE_Z     = 0.8      # 팔 장착 높이(선반 상단면)
+CART_STEP  = 0.01     # 좌표 목표 이동 스텝(m)
+JOINT_STEP = 0.05     # 관절 이동 스텝(rad)
+HOME_Q     = np.array([0.0, 0.0, 1.2, 0.0, 1.0, 0.0], dtype=np.float32)
 
-# ============================================================================
-# [1] 시뮬레이션 / 물리 엔진 초기화  (sim = '우주', 물리 법칙이 적용되는 세계)
-# ============================================================================
+# ============================================================ [1] 시뮬
 gym = gymapi.acquire_gym()
-args = gymutil.parse_arguments(description="A0509 only - IK Cartesian control")
+args = gymutil.parse_arguments(description="A0509 keyboard JSC/TSC/OSC")
+sp = gymapi.SimParams()
+sp.up_axis = gymapi.UP_AXIS_Z
+sp.gravity = gymapi.Vec3(0.0, 0.0, -9.81)
+sp.dt = 1.0 / 60.0
+sp.physx.solver_type = 1
+sp.physx.use_gpu = True
+sp.physx.num_position_iterations = 8
+sp.physx.num_velocity_iterations = 1
+sp.use_gpu_pipeline = False
+sim = gym.create_sim(args.compute_device_id, args.graphics_device_id, args.physics_engine, sp)
+pp = gymapi.PlaneParams(); pp.normal = gymapi.Vec3(0, 0, 1)
+gym.add_ground(sim, pp)
 
-sim_params = gymapi.SimParams()
-sim_params.up_axis = gymapi.UP_AXIS_Z
-sim_params.gravity = gymapi.Vec3(0.0, 0.0, -9.81)
-sim_params.dt = 1.0 / 60.0
-sim_params.physx.solver_type = 1
-sim_params.physx.use_gpu = True
-sim_params.physx.num_position_iterations = 8
-sim_params.physx.num_velocity_iterations = 1
-sim = gym.create_sim(args.compute_device_id, args.graphics_device_id,
-                     args.physics_engine, sim_params)
-
-# 바닥면은 env가 아니라 sim에 붙음 (모든 env가 공유하는 무한 평면)
-plane_params = gymapi.PlaneParams()
-plane_params.normal = gymapi.Vec3(0, 0, 1)
-gym.add_ground(sim, plane_params)
-
-# ============================================================================
-# [2] 무대(env) 준비 + 선반+로봇 통합 배치
-#   선반과 로봇이 fixed joint로 결합된 통합 에셋(a0509_on_stand)을 하나로 스폰.
-#   fix_base=False → 월드에 안 박고 통째로 바닥에 얹힘 (중력으로 안착).
-#   IK는 순수 로봇팔 원본(a0509.urdf)으로 계산 → 좌표 웨이포인트는 로봇 베이스 기준.
-# ============================================================================
+# ============================================================ [2] 씬
 env = gym.create_env(sim, gymapi.Vec3(-1, -1, 0), gymapi.Vec3(1, 1, 2), 1)
 
-arm = DoosanA0509Controller(
+stand_opts = gymapi.AssetOptions(); stand_opts.fix_base_link = True
+stand_asset = gym.load_asset(sim, asset_root, "urdf/robot_stand/robot_stand.urdf", stand_opts)
+gym.create_actor(env, stand_asset, gymapi.Transform(p=gymapi.Vec3(0, 0, 0)), "stand", 0, 0)
+
+# 순수 A0509를 선반 상단(z=0.8)에 고정 장착 (OSC 동역학이 깔끔하도록 고정베이스 순수팔)
+arm = DoosanController(
     gym, sim, env, asset_root,
-    urdf="urdf/a0509_on_stand/a0509_on_stand.urdf",   # 액터: 선반+로봇 통합
-    ik_urdf="urdf/doosan_a0509/a0509.urdf",         # IK 계산: 순수 로봇팔
-    fix_base=False,                                  # 월드 비고정 → 바닥에 얹힘
-    spawn_transform=gymapi.Transform(p=gymapi.Vec3(0, 0, 0)),
+    urdf="urdf/doosan_a0509/a0509.urdf",
+    fix_base=True,
+    spawn_transform=gymapi.Transform(p=gymapi.Vec3(0, 0, BASE_Z)),
 )
-print(f"선반+A0509 통합 배치 완료 (바닥 안착, DOF {arm.num_dofs}개)")
 
-# --- 에어 컴프레셔를 선반 내부(바닥판 위)에 배치 (STEP→URDF 변환 에셋) ---
-comp_opts = gymapi.AssetOptions()
-comp_opts.fix_base_link = False          # 고정 안 함 → 중력으로 선반 바닥판 위에 얹힘
+comp_opts = gymapi.AssetOptions(); comp_opts.fix_base_link = True
 comp_asset = gym.load_asset(sim, asset_root, "urdf/air_compressor/air_compressor.urdf", comp_opts)
-gym.create_actor(env, comp_asset, gymapi.Transform(p=gymapi.Vec3(0, 0, 0.12)), "air_compressor", 0, 0)
-print("에어 컴프레셔 배치 완료 (선반 내부)")
+gym.create_actor(env, comp_asset, gymapi.Transform(p=gymapi.Vec3(0, 0, 0.02)), "air_compressor", 0, 0)
 
-# ============================================================================
-# [3] 좌표 시퀀스 '선언' (무엇을 어디로 — 좌표만 나열)
-#   좌표를 바꾸고 싶으면 이 리스트만 수정하면 된다.
-# ============================================================================
-waypoints = [
-    [0.35,  0.00, 0.55],
-    [0.30,  0.25, 0.45],
-    [0.30, -0.25, 0.45],
-    [0.00,  0.35, 0.60],
-    [0.40,  0.00, 0.70],
-]
-solved = arm.plan_path(waypoints)   # 좌표 → 관절각 사전 IK (오차 출력)
+# ============================================================ [3] 동역학 텐서(OSC)
+gym.prepare_sim(sim)
+arm.setup_osc()
 
-# ============================================================================
-# [4] 뷰어
-# ============================================================================
+# ============================================================ [4] 뷰어 + 키 등록
 viewer = gym.create_viewer(sim, gymapi.CameraProperties())
-gym.viewer_camera_look_at(viewer, env,
-                          gymapi.Vec3(1.6, 1.6, 1.3), gymapi.Vec3(0, 0, 0.5))
+gym.viewer_camera_look_at(viewer, env, gymapi.Vec3(1.6, 1.6, 1.6), gymapi.Vec3(0, 0, 0.9))
 
-# ============================================================================
-# [5] 메인 루프 (좌표 웨이포인트 순회)
-# ============================================================================
-steps_per_wp = int(HOLD_SEC / sim_params.dt)
-arm.go_joints(solved[0])
-print(f"\n[웨이포인트 0] → 좌표 목표 {waypoints[0]}")
+keymap = {
+    gymapi.KEY_1: "mode_jsc", gymapi.KEY_2: "mode_tsc", gymapi.KEY_3: "mode_osc",
+    gymapi.KEY_W: "x+", gymapi.KEY_S: "x-",
+    gymapi.KEY_A: "y+", gymapi.KEY_D: "y-",
+    gymapi.KEY_Q: "z+", gymapi.KEY_E: "z-",
+    gymapi.KEY_J: "joint_prev", gymapi.KEY_L: "joint_next",
+    gymapi.KEY_U: "joint+",     gymapi.KEY_O: "joint-",
+    gymapi.KEY_R: "home",
+}
+for key, act in keymap.items():
+    gym.subscribe_viewer_keyboard_event(viewer, key, act)
+
+print("""
+========== 두산 A0509 키보드 제어 ==========
+ [모드]  1:JSC(관절)   2:TSC(좌표+IK)   3:OSC(좌표+동역학)
+ [좌표 · TSC/OSC]  W/S:X±  A/D:Y±  Q/E:Z±
+ [관절 · JSC]      J/L:관절선택   U/O:각도±
+ [공통]  R:홈자세    (창 닫기: 종료)
+=============================================""")
+
+# ============================================================ [5] 상태 & 루프
+mode = "tsc"
+cart_target = np.array([0.35, 0.0, 0.55], dtype=np.float32)   # 로봇 베이스 기준
+joint_target = HOME_Q.copy()
+sel_joint = 0
+tsc_dirty = jsc_dirty = True
+
+def sync_cart():
+    """cart_target를 현재 손끝 위치로 맞춤(모드 전환 시 튐 방지)."""
+    global cart_target
+    cart_target = np.array(arm.current_tcp(), dtype=np.float32)
+
+# 시작 자세로
+arm.go_joints(HOME_Q)
+for _ in range(30):
+    gym.simulate(sim); gym.fetch_results(sim, True)
 
 step = 0
 while not gym.query_viewer_has_closed(viewer):
-    if step % steps_per_wp == 0:
-        wp_idx = (step // steps_per_wp) % len(waypoints)
-        # 직전 웨이포인트 실제 도달 오차 보고
-        if step > 0:
-            prev = ((step // steps_per_wp) - 1) % len(waypoints)
-            tgt = np.array(waypoints[prev])
-            cur = arm.current_tcp()
-            print(f"[웨이포인트 {prev} 도달] 목표={np.round(tgt,3)}  "
-                  f"실제손끝={np.round(cur,3)}  오차={np.linalg.norm(tgt-cur)*1000:.1f}mm")
-        arm.go_joints(solved[wp_idx])
-        print(f"[웨이포인트 {wp_idx}] → 좌표 목표 {waypoints[wp_idx]}")
+    for e in gym.query_viewer_action_events(viewer):
+        if e.value <= 0:
+            continue
+        a = e.action
+        if a == "mode_jsc":
+            mode = "jsc"; joint_target = arm.current_joints().copy(); jsc_dirty = True; print("[모드] JSC")
+        elif a == "mode_tsc":
+            mode = "tsc"; sync_cart(); tsc_dirty = True; print("[모드] TSC")
+        elif a == "mode_osc":
+            mode = "osc"; sync_cart(); print("[모드] OSC")
+        elif a in ("x+", "x-", "y+", "y-", "z+", "z-"):
+            ax = {"x": 0, "y": 1, "z": 2}[a[0]]
+            cart_target[ax] += (CART_STEP if a[1] == "+" else -CART_STEP)
+            tsc_dirty = True
+        elif a == "joint_prev":
+            sel_joint = (sel_joint - 1) % 6; print(f"[관절 선택] joint_{sel_joint+1}")
+        elif a == "joint_next":
+            sel_joint = (sel_joint + 1) % 6; print(f"[관절 선택] joint_{sel_joint+1}")
+        elif a == "joint+":
+            joint_target[sel_joint] += JOINT_STEP; jsc_dirty = True
+        elif a == "joint-":
+            joint_target[sel_joint] -= JOINT_STEP; jsc_dirty = True
+        elif a == "home":
+            mode = "jsc"; joint_target = HOME_Q.copy(); jsc_dirty = True; print("[홈 자세] → JSC")
 
-    gym.simulate(sim)
-    gym.fetch_results(sim, True)
-    gym.step_graphics(sim)
-    gym.draw_viewer(viewer, sim, True)
-    gym.sync_frame_time(sim)
+    # 선택된 모드로 제어
+    if mode == "jsc":
+        if jsc_dirty:
+            arm.go_joints(joint_target); jsc_dirty = False
+    elif mode == "tsc":
+        if tsc_dirty:
+            arm.go_cartesian(cart_target); tsc_dirty = False
+    elif mode == "osc":
+        # OSC는 월드 텐서 기준 → 장착높이 보정한 목표를 매 프레임 인가
+        arm.osc_update(cart_target + np.array([0, 0, BASE_Z], dtype=np.float32))
+
+    gym.simulate(sim); gym.fetch_results(sim, True)
+    gym.step_graphics(sim); gym.draw_viewer(viewer, sim, True); gym.sync_frame_time(sim)
+
+    if step % 60 == 0:
+        tcp = arm.current_tcp()
+        extra = f"  [선택 joint_{sel_joint+1}]" if mode == "jsc" else ""
+        print(f"[{mode.upper()}] 목표(베이스)={np.round(cart_target,3)} 손끝={np.round(tcp,3)}{extra}")
     step += 1
 
 gym.destroy_viewer(viewer)

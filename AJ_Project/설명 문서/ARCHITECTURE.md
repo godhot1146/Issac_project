@@ -1,151 +1,130 @@
-# 프로젝트 구조 및 동작 설명
+# AJ_Project 구조 및 동작 설명
 
-Isaac Gym 기반 창고 물류/딜리버리 시뮬레이션의 파일 구성과 모듈 간 동작 흐름을 정리한 문서.
+Isaac Gym 기반 **두산 A0509 로봇팔** 시뮬레이션. 좌표(x,y,z) 웨이포인트를 역기구학(IK)으로
+풀어 손끝(link_6)이 그 좌표를 따라가게 하고, 로봇은 선반(스탠드) 위에 장착되며 선반 안에는
+에어 컴프레셔가 놓인다.
 
----
-
-## 📂 트리 구조 (역할별)
-
-> 각 파일 앞의 `[번호]`는 계층/읽는 순서를 나타내는 표기일 뿐, 실제 파일 이름은 아니다.
-> (파이썬 모듈명은 숫자로 시작할 수 없어 import가 깨지므로 파일명에는 붙이지 않는다.)
-
-```
-delivery_project/
-│
-├─ [0] 🎯 run.py   ★ 메인 통합 환경·실행 진입점 (root의 유일한 실행 파일)
-│         └ controllers/ 모듈들을 모두 불러와 창고 시뮬레이션을 조립·실행
-│
-├─ 📁 controllers/   🧩 제어 모듈 (재사용 라이브러리 — run.py가 import하는 순서)
-│   ├─ [1] indy7_controller_v1.py        Indy7 로봇팔 제어   (1353줄, 핵심)
-│   │        └ [1a] indy7_box_controller.py   [1] 감싼 박스 픽앤플레이스 (198줄)
-│   ├─ [2] low_amr_controller_v2.py      저상형 AMR 제어     (716줄)
-│   ├─ [3] forklift_amr_controller_v1.py 포크리프트 AMR 제어  (569줄)
-│   ├─ [4] conveyor_belt.py              컨베이어 벨트        (476줄)
-│   └─ [5] cardboard_box_manager.py      박스 생성·관리       (568줄)
-│
-├─ 📁 demos/         🔬 단일 에셋 확인용 데모/테스트
-│   ├─ [D1] carter_test.py               Carter AMR 로드 확인
-│   ├─ [D2] franka_test.py               Franka 로드 확인
-│   ├─ [D3] a0509_control_demo.py        Doosan A0509 데모
-│   ├─ [D4] test_doosan_a0509.py         A0509 로드/파싱 점검
-│   ├─ [D5] amr_moving_test.py           forklift + low_amr 이동 테스트
-│   └─ [D6] integration_test.py          통합 테스트
-│
-├─ 📁 tests/                         모듈 격리 실행 스크립트 (test_common의 최소 환경에서
-│                                    conveyor·forklift·lowamr·indyarm·box 단독 수동 점검)
-├─ 📁 usability_improvement_tests/   raycast 마우스 피킹 실험
-├─ 📁 map_for_robot_navigation/      생성된 occupancy map (png+yaml, 로봇 네비게이션용)
-├─ 📁 debug/                         디버그 출력
-├─ 📁 설명 문서/                     프로젝트 문서 (이 ARCHITECTURE.md + 개요.html + 각 handoff)
-├─ 📁 Old_files/                     옛 버전 아카이브 (a_star 경로계획, main.py 등)
-│
-├─ requirements_for_this_project.txt  의존 패키지
-└─ .gitignore
-```
-
-**번호 표기 규칙**
-- `[0]` = 실행 진입점 (여기서 시작)
-- `[1]~[5]` = `controllers/`의 핵심 제어 모듈 (`run.py`가 불러오는 순서)
-- `[1a]` = `[1]`을 감싼 파생 모듈
-- `[D1]~[D6]` = `demos/`의 개별 장비 확인용 데모/테스트 (Demo)
-
-> **import 경로:** 제어 모듈이 `controllers/` 하위로 분리됐으므로, 각 실행 스크립트는
-> `sys.path`에 `controllers/`를 추가한다 (`run.py`·`demos/`·`tests/`·`usability_.../` 모두 처리됨).
-> 파일명·import 문은 그대로이고 경로만 추가되어 `from conveyor_belt import ...` 형태는 유지된다.
+> ⚠️ 이 프로젝트는 원래 창고 물류(AMR·컨베이어·Indy7) 시뮬이었으나 **두산 A0509 중심으로 재구성**되었다.
+> 옛 창고 컨트롤러·테스트는 아직 파일로 남아 있지만 **현재 `run.py`는 사용하지 않는다**(레거시). → [레거시 섹션](#-레거시-미사용) 참고.
 
 ---
 
-## ⚙️ 모듈 의존 관계 (누가 누구를 import 하나)
-
-실제 import 관계를 분석하면 명확한 계층 구조를 이룬다.
+## 📂 현재 트리 구조 (역할별)
 
 ```
-                   [0] run.py   ← 최상위 오케스트레이터
-                        │ (import)
-        ┌───────────┬───┴────┬──────────────┬──────────────┐
-        ▼           ▼        ▼              ▼              ▼
- [5]cardboard   [4]conveyor [1]indy7_     [2]low_amr_   [3]forklift_amr_
-   _box_manager   _belt     controller_v1  controller_v2  controller_v1
-   (박스생성)     (이송)     (로봇팔)        (AMR)          (포크리프트)
-                            ▲
-                            │ (import)
-                  [1a]indy7_box_controller   [D5]amr_moving_test
-                     (픽앤플레이스 래퍼)        → [3]forklift + [2]low_amr 사용
+AJ_Project/
+│
+├─ 🎯 run.py                      ★ 메인 실행 진입점 (조립 전용, 약 123줄)
+│      └ 무대(sim·env) 준비 → 선반+로봇 통합 배치 → 컴프레셔 배치 →
+│        좌표 시퀀스 선언 → 루프 (제어 로직은 controllers/에 위임)
+│
+├─ 📁 controllers/
+│   └─ 🤖 doosan_a0509_controller.py   두산 A0509 제어 모듈 (약 128줄, 현재 유일 사용)
+│           에셋 로드·스폰·DOF 위치제어·ikpy 역기구학을 캡슐화
+│   └─ (indy7_*, low_amr_*, forklift_*, conveyor_belt, cardboard_box_manager
+│       → 옛 창고용, 현재 run.py 미사용 = 레거시)
+│
+├─ 📁 test_scripts/
+│   ├─ a0509_ik_demo.py         ★ 좌표 추종(IK) 단독 데모 — run.py 이전의 검증본
+│   ├─ a0509_control_demo.py    관절각 직접 제어 데모 (IK 없이)
+│   ├─ test_doosan_a0509.py     A0509 로드/파싱 점검
+│   └─ (carter/franka/amr/conveyor/indyarm/... → 레거시 창고 테스트)
+│
+├─ 📁 설명 문서/                  이 ARCHITECTURE.md + 개요.html + 각종 handoff(레거시)
+├─ 📁 map_for_robot_navigation/   옛 네비게이션 맵 (레거시)
+├─ 📁 debug/                      디버그 출력
+└─ run.py.bak                     창고 버전 run.py 백업(920줄) — 복원용
 ```
 
-| 파일 | import 하는 모듈 |
+---
+
+## 🧩 사용하는 에셋 (Issac_asset 저장소)
+
+`ISAAC_ASSETS` 경로 하위의 URDF. 이번 재구성에서 새로 만든 것 3개:
+
+| 에셋 | 경로 | 내용 |
+|---|---|---|
+| **통합(선반+로봇)** | `urdf/a0509_on_stand/a0509_on_stand.urdf` | A0509 + 선반을 fixed joint로 결합. `run.py`가 스폰하는 실체 |
+| **선반 단독** | `urdf/robot_stand/robot_stand.urdf` | 60×60×80cm 스탠드, Ø30 기둥 4개(개방 프레임). 편집용 소스 |
+| **에어 컴프레셔** | `urdf/air_compressor/air_compressor.urdf` | STL→변환 단일 바디(약 46×31×65cm). 시각=메쉬 / 충돌=박스 |
+| (원본 로봇팔) | `urdf/doosan_a0509/a0509.urdf` | 순수 A0509 6축. **IK 계산용**으로 참조 |
+
+> **통합 에셋 생성 방식**: `a0509.urdf`(로봇) 내용을 그대로 두고 앞에 `stand_base_link`(선반)와
+> `stand_to_robot`(fixed joint, z=0.8)만 끼워 넣은 파일. 로봇 메쉬는 `../doosan_a0509/meshes` 참조.
+
+---
+
+## 🔄 run.py 런타임 동작 흐름
+
+```
+[1] 시뮬 초기화      sim 생성(PhysX·중력·60Hz) + 바닥면(sim에 부착, 전체 공유)
+[2] 무대 + 배치      env(빈 방) 생성
+      ├ 선반+로봇 통합  DoosanA0509Controller (fix_base=False → 바닥에 얹힘)
+      │                 · urdf   = a0509_on_stand (액터)
+      │                 · ik_urdf= a0509 (순수 로봇팔, IK 체인용)
+      └ 컴프레셔         선반 바닥판 위에 얹음 (fix_base=False)
+[3] 좌표 시퀀스 선언  waypoints 리스트 → arm.plan_path()로 관절각 사전 IK
+[4] 뷰어 생성
+[5] 메인 루프        웨이포인트 순회: go_joints() → simulate → fetch → draw
+                     (HOLD_SEC마다 다음 좌표로 전환, 실제 도달 오차 출력)
+```
+
+### 핵심 좌표계
+- **선반/로봇 통합 원점** = 선반 바닥면 중심(z=0). 스폰 Vec3가 이 점을 배치.
+- 로봇 base_link는 통합 에셋 내부 fixed joint로 **z=0.8**에 자동 장착.
+- **컴프레셔 원점** = 바닥면 중심(z=0). 스폰 Vec3의 z가 곧 바닥 높이.
+- **IK 좌표(waypoints)** 는 로봇 base_link 기준 → 로봇을 선반 위로 올려도 그대로 유효.
+
+---
+
+## 🤖 DoosanA0509Controller (controllers/doosan_a0509_controller.py)
+
+두산 관련 저수준 처리를 캡슐화 → `run.py`는 좌표만 넘긴다.
+
+| 메서드 | 역할 |
 |---|---|
-| `run.py` | cardboard_box_manager, conveyor_belt, indy7_controller_v1, low_amr_controller_v2, forklift_amr_controller_v1 |
-| `indy7_box_controller.py` | indy7_controller_v1 |
-| `amr_moving_test.py` | forklift_amr_controller_v1, low_amr_controller_v2 |
+| `__init__(gym, sim, env, asset_root, urdf, ik_urdf, fix_base, spawn_transform, ...)` | 에셋 로드 + 액터 스폰 + DOF 위치제어(PD) 설정 + ikpy 체인 구성 |
+| `solve_ik(xyz, seed)` | 좌표 → 6관절 각도(rad), 도달좌표·오차(mm) 반환 |
+| `go_cartesian(xyz)` | 좌표 목표 설정 (IK 변환, 직전 해를 seed로 연속성) |
+| `go_joints(q6)` | 6관절 각도 직접 설정 (IK 없이) |
+| `plan_path(waypoints)` | 좌표 리스트 → 관절각 리스트 사전 IK (seed 이어가기) |
+| `current_tcp()` / `current_joints()` | 현재 손끝 좌표 / 현재 관절각 (FK) |
 
----
-
-## 🔄 런타임 동작 흐름
-
-1. `run.py` 실행 → Isaac Gym `sim` 생성
-2. 환경변수 `ISAAC_ASSETS` 경로에서 각 모듈이 담당 **URDF를 로드** (Issac_asset 저장소의 에셋)
-3. **`cardboard_box_manager`** 가 박스를 스폰 → **`conveyor_belt`** 이 이송
-4. **`indy7_controller_v1`** (로봇팔)이 박스를 집어 **AMR**(`low_amr` / `forklift_amr`)에 적재
-5. 매 프레임 각 컨트롤러의 제어 루프가 관절/바퀴 목표값을 갱신하며 시뮬레이션 진행
+- **제어 방식**: `DOF_MODE_POS`(위치제어) + PD 게인(stiffness 600 / damping 50)
+- **IK 라이브러리**: ikpy (base_link→joint_1 체인, 6축)
 
 ---
 
 ## 🧭 한눈 요약
 
-- **`run.py`** = 지휘자 (전체 조립·실행)
-- **`*_controller` / `*_manager`** = 각 장비 담당 단원 (재사용 모듈)
-- 루트의 **`*_test.py` / `*_demo.py`** = 개별 장비를 따로 확인하는 리허설
-- **`tests/`** = 자동 단위 검증
+- **`run.py`** = 지휘자 (무대 준비·배치·시퀀스 선언·루프)
+- **`doosan_a0509_controller.py`** = 두산 팔 전담 (로드·제어·IK)
+- **에셋 3종**(통합·선반·컴프레셔)이 씬을 구성
+- 좌표만 바꾸면(=`run.py`의 `waypoints`) 동작이 바뀜
 
 ---
 
-## 🌳 `run.py` 내부 구조 (메인 실행 파일, 820줄)
+## 🗄 레거시 (미사용)
 
-`run.py`는 `[SECTION 1]~[SECTION 12]`로 구획되어 있다.
+아래는 **옛 창고 물류 버전**의 잔재로, 현재 `run.py`가 import/실행하지 않는다.
+필요 없으면 삭제해도 현재 시뮬에 영향 없다.
 
-```
-run.py
-│
-├─ 📦 import — isaacgym + 제어 모듈 5종
-│
-├─ ⚙️ [1] 시뮬레이션/물리 엔진 초기화 (SimParams·PhysX GPU·add_ground)
-├─ 🏭 [2] 공장 레이아웃 — 방 10.0×8.5, 벽 4면, 코너 기둥 4개
-├─ 📚 [3] 창고 구조물 스폰 — 랙·팔레트·패키지·컨베이어·공정설비·게스트공간
-├─ 🤖 [4] 로봇 인스턴스 스폰 — IndyArm ×3, LowAMR, ForkliftAMR, ConveyorBelt
-├─ 📐 [5] 박스 접기 단계 레지스트리 — unfolded_flat→fold_sides→…→close_top
-├─ 📦 [6] 카드보드 박스 스폰 8개 + CardboardBoxManager
-├─ 🧮 [7] 텐서 준비 (gym.prepare_sim 이후 setup_tensors)
-├─ 🎛️ [8] 로봇 프리셋 등록 — register_attachable / register_joint_pose
-├─ 🔧 [9] 스텝 콜백 함수 — _attach/_detach, _box_*_fold, _mark_* 등
-│
-├─ 🎬 [10] 자율 시퀀스 러너 등록  ("무엇을 언제" 선언만)
-│   ├─ 10-1 LowAMR:   MOVE_TO_CARGO → LIFT_UP → RETREAT → MOVE_TO_DEST
-│   ├─ 10-2 Forklift: INITIAL → 선반밑 진입+리프트 → 선반 이동 → 재진입
-│   ├─ 10-3 Indy7 팔:  runner1(컨베이어 픽업→팔레트) /
-│   │                  runner2(박스 접기 FOLD1~14) / runner3(패키지 적재)
-│   └─ 10-4 Conveyor: FIRST_MOVE → SECOND_MOVE
-│
-├─ ⌨️ [11] 키 입력 등록 — SPACE(시작)·R(리셋)·WASDQE(박스수동)·9/0(팔선택) 등
-│
-└─ 🔁 [12] 메인 시뮬레이션 루프 (while 뷰어 열림)
-    ├─ 12-1 입력 이벤트 처리
-    ├─ 12-2 물리 스텝 (simulate→fetch→draw→refresh 텐서)
-    ├─ 12-3 팔 3대 처리 (키입력→step→흡착추종→마커)
-    ├─ 12-4 자율 러너 6개 update(frame_count)   ← 시퀀스 실제 실행
-    ├─ 12-5 flush_dof_targets (관절 명령 일괄 반영)
-    └─ 12-6 박스 매니저 후처리 (관절/플랫폼락/자식갱신)
-```
-
-### 핵심 패턴 — "선언"과 "실행"의 분리
-
-- **[1]~[8] = 준비(setup)**: 씬·로봇·박스를 만들고 텐서·프리셋을 한 번만 등록
-- **[9]~[10] = 시나리오 선언**: "언제 무엇을" 러너로 정의 (아직 실행 안 함)
-- **[12] 루프 = 실행 엔진**: 매 프레임 물리 1스텝을 돌리고, 등록된 **러너 6개**(LowAMR·Forklift·팔3·컨베이어)의 `update()`를 호출해 시퀀스를 전진
-
-새 동작을 추가하려면 **SECTION 10에 러너 스텝만 추가**하면 된다. 러너끼리는 `wait_for` / `on_complete` 콜백으로 신호를 주고받으며 연결된다
-(예: 팔이 박스를 팔레트에 놓으면 `_mark_forklift_ready` 콜백으로 포크리프트가 출발).
+- `controllers/` : `indy7_controller_v1`, `indy7_box_controller`, `low_amr_controller_v2`,
+  `forklift_amr_controller_v1`, `conveyor_belt`, `cardboard_box_manager`
+- `test_scripts/` : `carter_test`, `franka_test`, `amr_moving_test`, `integration_test`,
+  `test_conveyor`, `test_forklift`, `test_lowamr`, `test_indyarm*`, `test_cardboardbox`, `test_common`
+- `설명 문서/` : `ConveyorBelt_handoff.html`, `LowAMR_handoff.html`, `ForkliftAMR_handoff.html`,
+  `CardboardBoxManager_handoff.html`, `IndyArmController_handoff.html`, `개요.html` (창고 기준)
+- `map_for_robot_navigation/` : 옛 네비게이션 맵
+- `run.py.bak` : 창고 버전 run.py 백업(920줄)
 
 ---
 
-> 실행 방법·의존성·에셋 연결(`ISAAC_ASSETS`)은 저장소 최상위 [README](../../README.md) 참고.
+## ▶ 실행
+
+```bash
+conda activate issac_env
+cd ~/Desktop/Issac_project/AJ_Project
+python run.py
+```
+의존: `numpy`, `ikpy`, NVIDIA `isaacgym`. (에셋 경로는 `ISAAC_ASSETS` 환경변수)
