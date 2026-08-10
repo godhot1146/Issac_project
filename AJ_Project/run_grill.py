@@ -65,6 +65,15 @@ READY_CENTER = (ROOM_X_MAX - 0.3, RACK_Y_MAX - 0.45)   # 준비존 중심(work_t
 RIG_X, RIG_Y = 0.0, READY_CENTER[1]
 
 # ============================================================ [1] 시뮬
+# ┌── 스폰(배치) 전체 그림 ─────────────────────────────────────────────┐
+# │ acquire_gym()  : gym 핸들 획득(모든 API의 진입점)                    │
+# │ create_sim()   : 물리 세계 1개 생성(중력·타임스텝·PhysX 설정 포함)   │
+# │ add_ground()   : 그 세계에 무한 바닥면(z=0) 부착 → 모든 env가 공유    │
+# │ create_env()   : 액터를 담을 '방' 생성 (이 파일은 1개 → env원점=월드)│
+# │ load_asset()   : URDF를 파싱해 sim에 '에셋 템플릿' 등록 (형상·관성)  │
+# │ create_actor() : 그 템플릿을 env 안에 '실체(액터)'로 찍음 + 위치 지정 │
+# └─────────────────────────────────────────────────────────────────────┘
+# 즉 load_asset=붕어빵 '틀' 한 번 만들기 / create_actor=그 틀로 '붕어빵' 찍기.
 gym = gymapi.acquire_gym()
 args = gymutil.parse_arguments(description="A0509 keyboard JSC/TSC/OSC")
 sp = gymapi.SimParams()
@@ -76,26 +85,36 @@ sp.physx.use_gpu = True
 sp.physx.num_position_iterations = 8
 sp.physx.num_velocity_iterations = 1
 sp.use_gpu_pipeline = False
-sim = gym.create_sim(args.compute_device_id, args.graphics_device_id, args.physics_engine, sp)
-pp = gymapi.PlaneParams(); pp.normal = gymapi.Vec3(0, 0, 1)
-gym.add_ground(sim, pp)
+sim = gym.create_sim(args.compute_device_id, args.graphics_device_id, args.physics_engine, sp)   # 물리세계 1개
+pp = gymapi.PlaneParams(); pp.normal = gymapi.Vec3(0, 0, 1)   # 바닥면 법선 = +Z (Z-up)
+gym.add_ground(sim, pp)                                        # z=0 무한 바닥 부착(모든 env 공유)
 
 # ============================================================ [2] 씬
+# create_env(sim, lower, upper, num_per_row): 액터를 담을 방 1개.
+#   lower/upper = 이 env의 경계상자(여러 env일 때 격자 간격·시각화용). num=1이라 env원점=월드(0,0,0).
 env = gym.create_env(sim, gymapi.Vec3(-2.5, -2.5, 0), gymapi.Vec3(2.5, 2.5, 2), 1)
 
+# ── 스폰 3단계(설비마다 반복) ────────────────────────────────────────────
+#   ① AssetOptions: 로드 옵션. fix_base_link=True면 base_link를 월드에 '용접'(중력·충돌로 안 움직임).
+#   ② load_asset(sim, asset_root, "urdf경로", opts): URDF 파싱 → 에셋 '템플릿' 반환(형상·관성 등록).
+#   ③ create_actor(env, 템플릿, Transform, 이름, group, filter): 템플릿을 env에 실체로 찍음.
+#        · Transform.p = 위치 Vec3(x,y,z)  [env로컬 ≈ 월드],  Transform.r = 회전 Quat(생략시 무회전)
+#        · group  = 충돌 그룹(같은 값끼리만 충돌 계산),  filter = 비트마스크(끼리 충돌 제외)
 # 스탠드+팔+컴프레셔는 그릴/완료존/준비존 3곳에서 등거리인 RIG_X,RIG_Y로 이동 배치.
-stand_opts = gymapi.AssetOptions(); stand_opts.fix_base_link = True
-stand_asset = gym.load_asset(sim, asset_root, "urdf/a0509_stand/a0509_stand.urdf", stand_opts)
-gym.create_actor(env, stand_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, 0)), "stand", 0, 0)
+stand_opts = gymapi.AssetOptions(); stand_opts.fix_base_link = True   # ① 바닥 고정 설비
+stand_asset = gym.load_asset(sim, asset_root, "urdf/a0509_stand/a0509_stand.urdf", stand_opts)  # ② 템플릿
+gym.create_actor(env, stand_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, 0)), "stand", 0, 0)  # ③ 배치
 
-# 순수 A0509를 선반 상단(z=0.8)에 고정 장착 (OSC 동역학이 깔끔하도록 고정베이스 순수팔)
+# 팔은 DoosanController가 위 ①②③(load+create_actor)을 내부에서 대신 해줌 → 여기선 파라미터만 넘김.
+# 스탠드 상판(BASE_Z=0.81) 높이에 고정 장착. (OSC 동역학이 깔끔하도록 고정베이스 순수팔)
 arm = DoosanController(
     gym, sim, env, asset_root,
     urdf="urdf/doosan_a0509/a0509.urdf",
     fix_base=True,
-    spawn_transform=gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, BASE_Z)),
+    spawn_transform=gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, BASE_Z)),   # 팔 base_link를 상판 높이에
 )
 
+# 컴프레셔: 스탠드와 같은 XY에, 살짝 띄워(z=0.02) 배치. (①②③ 동일 패턴)
 comp_opts = gymapi.AssetOptions(); comp_opts.fix_base_link = True
 comp_asset = gym.load_asset(sim, asset_root, "urdf/air_compressor/air_compressor.urdf", comp_opts)
 gym.create_actor(env, comp_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, 0.02)), "air_compressor", 0, 0)
@@ -103,11 +122,14 @@ gym.create_actor(env, comp_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, 0
 # ---- 구이 도면(AJ_4종(구이)_조리솔루션) 기준 배치 (그릴/완료/준비존은 방 경계 고정, 로봇과 무관) ----
 # 그릴러: 설치공간 경계의 왼쪽-상단(북서) 모서리에 딱 맞게 — 뒷면을 벽(ROOM_WALL_Y)에,
 # 왼쪽면을 경계 왼쪽(ROOM_X_MIN)에 붙임. 손잡이(로컬 y=-0.095~0)는 반경 안쪽으로 살짝 걸침.
-grill_opts = gymapi.AssetOptions(); grill_opts.fix_base_link = True
+grill_opts = gymapi.AssetOptions(); grill_opts.fix_base_link = True   # 그릴=고정 설비
 grill_asset = gym.load_asset(sim, asset_root, "urdf/grill/grill.urdf", grill_opts)
 gym.create_actor(env, grill_asset,
                   gymapi.Transform(p=gymapi.Vec3(ROOM_X_MIN, ROOM_WALL_Y - 0.6, 0.0)), "grill", 0, 0)
 
+# 여기선 템플릿(asset)만 미리 로드해두고, 실제 배치(create_actor)는 아래 spawn_zone()이 존마다 반복.
+#   → 같은 템플릿 하나로 완료존/준비존에 여러 번 찍는 게 load_asset/create_actor 분리의 이점.
+# 고정 여부가 핵심: 테이블·랙은 고정(True), 바스켓만 이동체(False=중력/그리퍼에 반응).
 table_opts = gymapi.AssetOptions(); table_opts.fix_base_link = True
 rack_opts = gymapi.AssetOptions(); rack_opts.fix_base_link = True
 basket_opts = gymapi.AssetOptions(); basket_opts.fix_base_link = False  # 이동체(집었다 놓는 대상)
@@ -132,18 +154,24 @@ def spawn_zone(center, name_prefix, basket_flip, table_rot=ROT270):
     같은 자리(footprint)에서 180도 반대 방향을 보도록 spawn 오프셋만 바뀐다
     (ROT270: table(0.3,-0.45)/rack(0.0215,0), ROT90: table(-0.3,0.45)/rack(-0.0215,0))."""
     cx, cy = center
+    # 회전(r=table_rot)을 주면 메쉬 원점이 회전축이 되어 위치가 틀어지므로, 그만큼 spawn p를
+    # 오프셋(table_off/rack_off)해서 '같은 footprint 안'에 놓이게 보정한다(회전+평행이동 조합).
     if table_rot is ROT270:
         table_off, rack_off = (0.3, -0.45), (0.0215, 0.0)
     else:  # ROT90 — 방향 반대
         table_off, rack_off = (-0.3, 0.45), (-0.0215, 0.0)
+    # 받침대: 바닥(z=0)에. Transform에 p(위치)와 r(회전)을 함께 지정.
     gym.create_actor(env, table_asset,
                       gymapi.Transform(p=gymapi.Vec3(cx - table_off[0], cy - table_off[1], 0.0), r=table_rot),
                       f"{name_prefix}_table", 0, 0)
+    # 거치대: 받침대 상판(TABLE_TOP_Z) 위에 얹음 → z만 올려주면 3단 적층이 됨.
     gym.create_actor(env, rack_asset,
                       gymapi.Transform(p=gymapi.Vec3(cx - rack_off[0], cy - rack_off[1], TABLE_TOP_Z), r=table_rot),
                       f"{name_prefix}_rack", 0, 0)
     bx = (cx + BASKET_LEN / 2 if basket_flip else cx - BASKET_LEN / 2) + (-0.2 if basket_flip else 0.2)
     basket_rot = ROT180 if basket_flip else gymapi.Quat()  # gymapi.Quat() = identity(무회전)
+    # 바스켓 2개: 랙 상판(RACK_TOP_Z) 위 3cm 띄워 떨어뜨림(이동체라 물리로 랙 홈에 안착).
+    # 같은 basket_asset 템플릿을 dy만 바꿔 2번 create_actor → 이름은 유일해야 하므로 인덱스 붙임.
     for i, dy in enumerate([-NOTCH_SPACING, NOTCH_SPACING]):
         gym.create_actor(env, basket_asset, gymapi.Transform(
             p=gymapi.Vec3(bx, cy + dy, RACK_TOP_Z + 0.03), r=basket_rot),
@@ -156,6 +184,8 @@ spawn_zone(DONE_CENTER, "done", basket_flip=False, table_rot=ROT90)
 spawn_zone(READY_CENTER, "ready", basket_flip=True)
 
 # ============================================================ [3] 동역학 텐서(OSC)
+# 중요: 모든 create_actor(스폰)가 끝난 뒤에 prepare_sim 호출 → 이후엔 액터 추가 불가.
+#       prepare_sim이 물리 상태 텐서를 확정하고, 그걸 setup_osc가 받아 OSC 제어에 사용.
 gym.prepare_sim(sim)
 arm.setup_osc()
 
@@ -172,80 +202,13 @@ ROOM_LINES = np.array([
 ], dtype=np.float32)
 ROOM_COLORS = np.array([[1.0, 1.0, 0.0]] * 4, dtype=np.float32)
 
-keymap = {
-    gymapi.KEY_1: "mode_jsc", gymapi.KEY_2: "mode_tsc", gymapi.KEY_3: "mode_osc",
-    gymapi.KEY_W: "x+", gymapi.KEY_S: "x-",
-    gymapi.KEY_A: "y+", gymapi.KEY_D: "y-",
-    gymapi.KEY_Q: "z+", gymapi.KEY_E: "z-",
-    gymapi.KEY_J: "joint_prev", gymapi.KEY_L: "joint_next",
-    gymapi.KEY_U: "joint+",     gymapi.KEY_O: "joint-",
-    gymapi.KEY_R: "home",
-}
-for key, act in keymap.items():
-    gym.subscribe_viewer_keyboard_event(viewer, key, act)
-
-print("""
-========== 두산 A0509 키보드 제어 ==========
- [모드]  1:JSC(관절)   2:TSC(좌표+IK)   3:OSC(좌표+동역학)
- [좌표 · TSC/OSC]  W/S:X±  A/D:Y±  Q/E:Z±
- [관절 · JSC]      J/L:관절선택   U/O:각도±
- [공통]  R:홈자세    (창 닫기: 종료)
-=============================================""")
-
-# ============================================================ [5] 상태 & 루프
-mode = "tsc"
-cart_target = np.array([0.35, 0.0, 0.55], dtype=np.float32)   # 로봇 베이스 기준
-joint_target = HOME_Q.copy()
-sel_joint = 0
-tsc_dirty = jsc_dirty = True
-
-def sync_cart():
-    """cart_target를 현재 손끝 위치로 맞춤(모드 전환 시 튐 방지)."""
-    global cart_target
-    cart_target = np.array(arm.current_tcp(), dtype=np.float32)
-
-# 시작 자세로
-arm.go_joints(HOME_Q)
-for _ in range(30):
-    gym.simulate(sim); gym.fetch_results(sim, True)
+# 키보드 텔레오프 (JSC/TSC/OSC, 꾹 누르면 연속, TSC 자세 유지) — controllers/keyboard_teleop.py
+from doosan_arm_keyboard_teleop import DoosanArmKeyboardTeleop
+teleop = DoosanArmKeyboardTeleop(gym, viewer, arm, base_z=BASE_Z)
 
 step = 0
 while not gym.query_viewer_has_closed(viewer):
-    for e in gym.query_viewer_action_events(viewer):
-        if e.value <= 0:
-            continue
-        a = e.action
-        if a == "mode_jsc":
-            mode = "jsc"; joint_target = arm.current_joints().copy(); jsc_dirty = True; print("[모드] JSC")
-        elif a == "mode_tsc":
-            mode = "tsc"; sync_cart(); tsc_dirty = True; print("[모드] TSC")
-        elif a == "mode_osc":
-            mode = "osc"; sync_cart(); print("[모드] OSC")
-        elif a in ("x+", "x-", "y+", "y-", "z+", "z-"):
-            ax = {"x": 0, "y": 1, "z": 2}[a[0]]
-            cart_target[ax] += (CART_STEP if a[1] == "+" else -CART_STEP)
-            tsc_dirty = True
-        elif a == "joint_prev":
-            sel_joint = (sel_joint - 1) % 6; print(f"[관절 선택] joint_{sel_joint+1}")
-        elif a == "joint_next":
-            sel_joint = (sel_joint + 1) % 6; print(f"[관절 선택] joint_{sel_joint+1}")
-        elif a == "joint+":
-            joint_target[sel_joint] += JOINT_STEP; jsc_dirty = True
-        elif a == "joint-":
-            joint_target[sel_joint] -= JOINT_STEP; jsc_dirty = True
-        elif a == "home":
-            mode = "jsc"; joint_target = HOME_Q.copy(); jsc_dirty = True; print("[홈 자세] → JSC")
-
-    # 선택된 모드로 제어
-    if mode == "jsc":
-        if jsc_dirty:
-            arm.go_joints(joint_target); jsc_dirty = False
-    elif mode == "tsc":
-        if tsc_dirty:
-            arm.go_cartesian(cart_target); tsc_dirty = False
-    elif mode == "osc":
-        # OSC는 월드 텐서 기준 → 장착높이 보정한 목표를 매 프레임 인가
-        arm.osc_update(cart_target + np.array([0, 0, BASE_Z], dtype=np.float32))
+    teleop.handle_and_apply()   # 이벤트 처리 + 연속동작 + 모드별 제어
 
     gym.simulate(sim); gym.fetch_results(sim, True)
     gym.step_graphics(sim)
@@ -253,10 +216,6 @@ while not gym.query_viewer_has_closed(viewer):
     gym.add_lines(viewer, env, 4, ROOM_LINES, ROOM_COLORS)
     gym.draw_viewer(viewer, sim, True); gym.sync_frame_time(sim)
 
-    if step % 60 == 0:
-        tcp = arm.current_tcp()
-        extra = f"  [선택 joint_{sel_joint+1}]" if mode == "jsc" else ""
-        print(f"[{mode.upper()}] 목표(베이스)={np.round(cart_target,3)} 손끝={np.round(tcp,3)}{extra}")
     step += 1
 
 gym.destroy_viewer(viewer)

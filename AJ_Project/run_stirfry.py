@@ -263,89 +263,17 @@ gym.viewer_camera_look_at(
     gymapi.Vec3(0.0, 0.25, 0.80),
 )
 
-keymap = {
-    gymapi.KEY_1: "mode_jsc", gymapi.KEY_2: "mode_tsc", gymapi.KEY_3: "mode_osc",
-    gymapi.KEY_W: "x+", gymapi.KEY_S: "x-",
-    gymapi.KEY_A: "y+", gymapi.KEY_D: "y-",
-    gymapi.KEY_Q: "z+", gymapi.KEY_E: "z-",
-    gymapi.KEY_J: "joint_prev", gymapi.KEY_L: "joint_next",
-    gymapi.KEY_U: "joint+",     gymapi.KEY_O: "joint-",
-    gymapi.KEY_R: "home",
-}
-for key, act in keymap.items():
-    gym.subscribe_viewer_keyboard_event(viewer, key, act)
-
-print(f"""
-========== 두산 A0509 키보드 제어 ==========
-[씬] A0509 stand + {TABLE_ASSET_VERSION.upper()} tables + bowl 11개
- [모드]  1:JSC(관절)   2:TSC(좌표+IK)   3:OSC(좌표+동역학)
- [좌표 · TSC/OSC]  W/S:X±  A/D:Y±  Q/E:Z±
- [관절 · JSC]      J/L:관절선택   U/O:각도±
- [공통]  R:홈자세    (창 닫기: 종료)
-=============================================""")
-
-# ============================================================ [5] 상태 & 루프
-mode = "tsc"
-cart_target = np.array([0.35, 0.0, 0.55], dtype=np.float32)   # 로봇 베이스 기준
-joint_target = HOME_Q.copy()
-sel_joint = 0
-tsc_dirty = jsc_dirty = True
-
-def sync_cart():
-    """cart_target를 현재 손끝 위치로 맞춤(모드 전환 시 튐 방지)."""
-    global cart_target
-    cart_target = np.array(arm.current_tcp(), dtype=np.float32)
-
-# 시작 자세로
-arm.go_joints(HOME_Q)
-for _ in range(30):
-    gym.simulate(sim); gym.fetch_results(sim, True)
+# 키보드 텔레오프 (JSC/TSC/OSC, 꾹 누르면 연속, TSC 자세 유지) — controllers/keyboard_teleop.py
+from doosan_arm_keyboard_teleop import DoosanArmKeyboardTeleop
+teleop = DoosanArmKeyboardTeleop(gym, viewer, arm, base_z=BASE_Z)
 
 step = 0
 while not gym.query_viewer_has_closed(viewer):
-    for e in gym.query_viewer_action_events(viewer):
-        if e.value <= 0:
-            continue
-        a = e.action
-        if a == "mode_jsc":
-            mode = "jsc"; joint_target = arm.current_joints().copy(); jsc_dirty = True; print("[모드] JSC")
-        elif a == "mode_tsc":
-            mode = "tsc"; sync_cart(); tsc_dirty = True; print("[모드] TSC")
-        elif a == "mode_osc":
-            mode = "osc"; sync_cart(); print("[모드] OSC")
-        elif a in ("x+", "x-", "y+", "y-", "z+", "z-"):
-            ax = {"x": 0, "y": 1, "z": 2}[a[0]]
-            cart_target[ax] += (CART_STEP if a[1] == "+" else -CART_STEP)
-            tsc_dirty = True
-        elif a == "joint_prev":
-            sel_joint = (sel_joint - 1) % 6; print(f"[관절 선택] joint_{sel_joint+1}")
-        elif a == "joint_next":
-            sel_joint = (sel_joint + 1) % 6; print(f"[관절 선택] joint_{sel_joint+1}")
-        elif a == "joint+":
-            joint_target[sel_joint] += JOINT_STEP; jsc_dirty = True
-        elif a == "joint-":
-            joint_target[sel_joint] -= JOINT_STEP; jsc_dirty = True
-        elif a == "home":
-            mode = "jsc"; joint_target = HOME_Q.copy(); jsc_dirty = True; print("[홈 자세] → JSC")
-
-    # 선택된 모드로 제어
-    if mode == "jsc":
-        if jsc_dirty:
-            arm.go_joints(joint_target); jsc_dirty = False
-    elif mode == "tsc":
-        if tsc_dirty:
-            arm.go_cartesian(cart_target); tsc_dirty = False
-    elif mode == "osc":
-        # OSC는 월드 텐서 기준 → 장착높이 보정한 목표를 매 프레임 인가
-        arm.osc_update(cart_target + np.array([0, 0, BASE_Z], dtype=np.float32))
+    teleop.handle_and_apply()   # 이벤트 처리 + 연속동작 + 모드별 제어
 
     gym.simulate(sim); gym.fetch_results(sim, True)
     gym.step_graphics(sim); gym.draw_viewer(viewer, sim, True); gym.sync_frame_time(sim)
 
-    if step % 60 == 0:
-        tcp = arm.current_tcp()
-        extra = f"  [선택 joint_{sel_joint+1}]" if mode == "jsc" else ""
-        print(f"[{mode.upper()}] 목표(베이스)={np.round(cart_target,3)} 손끝={np.round(tcp,3)}{extra}")
     step += 1
 
 gym.destroy_viewer(viewer)

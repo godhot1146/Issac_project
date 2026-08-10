@@ -89,12 +89,18 @@ class DoosanController:
         self._mode = "effort"
 
     # ==================== 기구학 (IK / FK) ====================
-    def solve_ik(self, target_xyz, seed_6=None):
-        """좌표 → 6관절각(rad). 반환: (q6, 도달좌표, 오차mm)."""
+    def solve_ik(self, target_xyz, target_R=None, seed_6=None):
+        """좌표(+선택적 자세) → 6관절각(rad). 반환: (q6, 도달좌표, 오차mm).
+        target_R: 3x3 회전행렬. 주면 손끝 자세까지 구속(orientation_mode='all')."""
         init = np.zeros(len(self.chain.links))
         if seed_6 is not None:
             init[1:7] = seed_6
-        sol = self.chain.inverse_kinematics(target_position=target_xyz, initial_position=init)
+        if target_R is not None:
+            sol = self.chain.inverse_kinematics(
+                target_position=target_xyz, target_orientation=np.asarray(target_R),
+                orientation_mode="all", initial_position=init)
+        else:
+            sol = self.chain.inverse_kinematics(target_position=target_xyz, initial_position=init)
         reached = self.chain.forward_kinematics(sol)[:3, 3]
         err_mm = np.linalg.norm(np.array(target_xyz) - reached) * 1000.0
         return sol[1:7].astype(np.float32), reached, err_mm
@@ -102,6 +108,13 @@ class DoosanController:
     def current_joints(self):
         ds = self.gym.get_actor_dof_states(self.env, self.actor, gymapi.STATE_POS)
         return np.array(ds["pos"], dtype=np.float32)
+
+    def current_pose(self):
+        """현재 손끝 (위치 3, 회전행렬 3x3)."""
+        full = np.zeros(len(self.chain.links))
+        full[1:7] = self.current_joints()
+        T = self.chain.forward_kinematics(full)
+        return T[:3, 3].copy(), T[:3, :3].copy()
 
     def current_tcp(self):
         """현재 관절각 → FK → 손끝 좌표 (모드 무관)."""
@@ -117,9 +130,10 @@ class DoosanController:
                                                 np.asarray(q6, dtype=np.float32))
 
     # ==================== TSC (작업공간·IK) ====================
-    def go_cartesian(self, target_xyz):
-        """좌표 목표 → IK → 위치제어. 직전 해를 seed로 연속성."""
-        q6, reached, err = self.solve_ik(target_xyz, seed_6=self._last_q)
+    def go_cartesian(self, target_xyz, target_R=None):
+        """좌표(+선택적 자세) 목표 → IK → 위치제어. 직전 해를 seed로 연속성.
+        target_R을 주면 평행이동 중에도 손끝 자세(그리퍼 절대각)를 유지한다."""
+        q6, reached, err = self.solve_ik(target_xyz, target_R=target_R, seed_6=self._last_q)
         self._last_q = q6
         self.go_joints(q6)
         return reached, err
