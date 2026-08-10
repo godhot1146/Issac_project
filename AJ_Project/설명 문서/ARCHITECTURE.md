@@ -4,9 +4,6 @@ Isaac Gym 기반 **두산 A0509 로봇팔** 시뮬레이션. 좌표(x,y,z) 웨�
 풀어 손끝(link_6)이 그 좌표를 따라가게 하고, 로봇은 선반(스탠드) 위에 장착되며 선반 안에는
 에어 컴프레셔가 놓인다.
 
-> ⚠️ 이 프로젝트는 원래 창고 물류(AMR·컨베이어·Indy7) 시뮬이었으나 **두산 A0509 중심으로 재구성**되었다.
-> 옛 창고 컨트롤러·테스트는 아직 파일로 남아 있지만 **현재 `run.py`는 사용하지 않는다**(레거시). → [레거시 섹션](#-레거시-미사용) 참고.
-
 ---
 
 ## 📂 현재 트리 구조 (역할별)
@@ -21,19 +18,14 @@ AJ_Project/
 ├─ 📁 controllers/
 │   └─ 🤖 doosan_a0509_controller.py   두산 A0509 제어 모듈 (약 128줄, 현재 유일 사용)
 │           에셋 로드·스폰·DOF 위치제어·ikpy 역기구학을 캡슐화
-│   └─ (indy7_*, low_amr_*, forklift_*, conveyor_belt, cardboard_box_manager
-│       → 옛 창고용, 현재 run.py 미사용 = 레거시)
 │
 ├─ 📁 test_scripts/
 │   ├─ a0509_ik_demo.py         ★ 좌표 추종(IK) 단독 데모 — run.py 이전의 검증본
 │   ├─ a0509_control_demo.py    관절각 직접 제어 데모 (IK 없이)
-│   ├─ test_doosan_a0509.py     A0509 로드/파싱 점검
-│   └─ (carter/franka/amr/conveyor/indyarm/... → 레거시 창고 테스트)
+│   └─ test_doosan_a0509.py     A0509 로드/파싱 점검
 │
-├─ 📁 설명 문서/                  이 ARCHITECTURE.md + 개요.html + 각종 handoff(레거시)
-├─ 📁 map_for_robot_navigation/   옛 네비게이션 맵 (레거시)
-├─ 📁 debug/                      디버그 출력
-└─ run.py.bak                     창고 버전 run.py 백업(920줄) — 복원용
+├─ 📁 설명 문서/                  이 ARCHITECTURE.md
+└─ 📁 debug/                      디버그 출력
 ```
 
 ---
@@ -101,22 +93,6 @@ AJ_Project/
 - **`doosan_a0509_controller.py`** = 두산 팔 전담 (로드·제어·IK)
 - **에셋 3종**(통합·선반·컴프레셔)이 씬을 구성
 - 좌표만 바꾸면(=`run.py`의 `waypoints`) 동작이 바뀜
-
----
-
-## 🗄 레거시 (미사용)
-
-아래는 **옛 창고 물류 버전**의 잔재로, 현재 `run.py`가 import/실행하지 않는다.
-필요 없으면 삭제해도 현재 시뮬에 영향 없다.
-
-- `controllers/` : `indy7_controller_v1`, `indy7_box_controller`, `low_amr_controller_v2`,
-  `forklift_amr_controller_v1`, `conveyor_belt`, `cardboard_box_manager`
-- `test_scripts/` : `carter_test`, `franka_test`, `amr_moving_test`, `integration_test`,
-  `test_conveyor`, `test_forklift`, `test_lowamr`, `test_indyarm*`, `test_cardboardbox`, `test_common`
-- `설명 문서/` : `ConveyorBelt_handoff.html`, `LowAMR_handoff.html`, `ForkliftAMR_handoff.html`,
-  `CardboardBoxManager_handoff.html`, `IndyArmController_handoff.html`, `개요.html` (창고 기준)
-- `map_for_robot_navigation/` : 옛 네비게이션 맵
-- `run.py.bak` : 창고 버전 run.py 백업(920줄)
 
 ---
 
