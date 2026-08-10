@@ -6,6 +6,9 @@ __pycache__/
 .vscode/
 *.vc.db
 
+# 컴퓨터마다 다른 에셋 경로 저장 파일 (asset_config.py 가 생성) — 커밋 금지
+config.local.json
+
 # OS
 .DS_Store
 Thumbs.db

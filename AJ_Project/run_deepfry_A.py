@@ -55,10 +55,8 @@ from doosan_controller import DoosanController
 # 기본 설정
 # ============================================================
 
-asset_root = os.environ.get(
-    "ISAAC_ASSETS",
-    "/home/hprobot/isaacgym/Issac_asset/isaac_assets"
-)
+from asset_config import get_asset_root
+asset_root = get_asset_root()   # 컴퓨터마다 에셋 위치 자동 탐색/저장 (asset_config.py 참고)
 
 BASE_Z = 0.8
 

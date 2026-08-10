@@ -24,7 +24,8 @@ from isaacgym import gymapi, gymutil   # torch보다 먼저
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "controllers"))
 from doosan_controller import DoosanController
 
-asset_root = os.environ.get("ISAAC_ASSETS", "/home/henry/Desktop/Issac_asset/isaac_assets")
+from asset_config import get_asset_root
+asset_root = get_asset_root()   # 컴퓨터마다 에셋 위치 자동 탐색/저장 (asset_config.py 참고)
 
 BASE_Z     = 0.81     # 팔 장착 높이(A0509_Stand 상판면)
 CART_STEP  = 0.01     # 좌표 목표 이동 스텝(m)
