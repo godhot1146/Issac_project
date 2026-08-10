@@ -66,6 +66,32 @@ comp_opts = gymapi.AssetOptions(); comp_opts.fix_base_link = True
 comp_asset = gym.load_asset(sim, asset_root, "urdf/air_compressor/air_compressor.urdf", comp_opts)
 gym.create_actor(env, comp_asset, gymapi.Transform(p=gymapi.Vec3(0, 0, 0.02)), "air_compressor", 0, 0)
 
+# ------------------------------------------------------------
+# Bonitkit
+# ------------------------------------------------------------
+
+bonit_opts = gymapi.AssetOptions()
+bonit_opts.fix_base_link = True
+
+bonit_asset = gym.load_asset(
+    sim,
+    asset_root,
+    "urdf/bonitkit/bonitkit.urdf",   # 실제 URDF 이름에 맞게 수정
+    bonit_opts
+)
+
+bonit_pose = gymapi.Transform()
+bonit_pose.p = gymapi.Vec3(0.8, 0.0, 0.0)
+
+gym.create_actor(
+    env,
+    bonit_asset,
+    bonit_pose,
+    "bonitkit",
+    0,
+    0
+)
+
 # ============================================================ [3] 동역학 텐서(OSC)
 gym.prepare_sim(sim)
 arm.setup_osc()
