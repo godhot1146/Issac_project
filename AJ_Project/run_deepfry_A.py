@@ -58,7 +58,7 @@ from doosan_controller import DoosanController
 from asset_config import get_asset_root
 asset_root = get_asset_root()   # 컴퓨터마다 에셋 위치 자동 탐색/저장 (asset_config.py 참고)
 
-BASE_Z = 0.8
+BASE_Z = 0.81   # a0509_stand 상판(로봇 장착면) 높이
 
 CART_STEP = 0.01       # 10 mm
 JOINT_STEP = 0.05      # rad
@@ -178,6 +178,9 @@ gym.set_rigid_body_color(
 
 # ============================================================
 # 로봇 스탠드
+#
+# a0509_stand.urdf 원점은 로봇 장착면(윗면) 중심이라
+# 스폰 z를 BASE_Z로 주면 그 높이가 곧 장착면 높이가 된다.
 # ============================================================
 
 stand_opts = gymapi.AssetOptions()
@@ -186,12 +189,12 @@ stand_opts.fix_base_link = True
 stand_asset = gym.load_asset(
     sim,
     asset_root,
-    "urdf/robot_stand/robot_stand.urdf",
+    "urdf/a0509_stand/a0509_stand.urdf",
     stand_opts
 )
 
 stand_pose = gymapi.Transform()
-stand_pose.p = gymapi.Vec3(0, 0, 0)
+stand_pose.p = gymapi.Vec3(0, 0, BASE_Z)
 
 gym.create_actor(
     env,
@@ -992,3 +995,4 @@ gym.destroy_viewer(viewer)
 gym.destroy_sim(sim)
 
 print("종료.")
+

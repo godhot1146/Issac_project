@@ -27,7 +27,7 @@ from doosan_controller import DoosanController
 from asset_config import get_asset_root
 asset_root = get_asset_root()   # 컴퓨터마다 에셋 위치 자동 탐색/저장 (asset_config.py 참고)
 
-BASE_Z     = 0.8      # 팔 장착 높이(선반 상단면)
+BASE_Z     = 0.81     # 팔 장착 높이(a0509_stand 상단면, 마운트 포인트)
 CART_STEP  = 0.01     # 좌표 목표 이동 스텝(m)
 JOINT_STEP = 0.05     # 관절 이동 스텝(rad)
 HOME_Q     = np.array([0.0, 0.0, 1.2, 0.0, 1.0, 0.0], dtype=np.float32)
@@ -65,9 +65,11 @@ floor_actor = gym.create_actor(
 )
 gym.set_rigid_body_color(env, floor_actor, 0, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(1.0, 1.0, 1.0))
 
+# 로봇팔 거치대(A0509_Stand, STEP→URDF 변환, 0.6x0.9x0.81m). 원점이 로봇 마운트면(윗면)이라
+# z=BASE_Z(=0.81, 스탠드 높이와 동일)에 놓으면 바닥면이 정확히 바닥(z=0)에 닿는다.
 stand_opts = gymapi.AssetOptions(); stand_opts.fix_base_link = True
-stand_asset = gym.load_asset(sim, asset_root, "urdf/robot_stand/robot_stand.urdf", stand_opts)
-gym.create_actor(env, stand_asset, gymapi.Transform(p=gymapi.Vec3(0, 0, 0)), "stand", 0, 0)
+stand_asset = gym.load_asset(sim, asset_root, "urdf/a0509_stand/a0509_stand.urdf", stand_opts)
+gym.create_actor(env, stand_asset, gymapi.Transform(p=gymapi.Vec3(0, 0, BASE_Z)), "stand", 0, 0)
 
 # 작업대(WorkTable2, STEP→URDF 변환) 에셋. 오른쪽/뒤 선반 대용으로 아래에서 재사용.
 table_opts = gymapi.AssetOptions(); table_opts.fix_base_link = True
@@ -100,31 +102,15 @@ basket_opts.vhacd_params = gymapi.VhacdParams()
 basket_opts.vhacd_params.resolution = 300000
 basket_asset = gym.load_asset(sim, asset_root, "urdf/fryer_basket/fryer_basket.urdf", basket_opts)
 
-# 실측(STL) 기준 로컬 치수: x:[-0.1947,0.4116](손잡이가 +x쪽으로 돌출, 반길이 0.303), y:[-0.0855,0.0855], z:[-0.0062,0.2558]
-BASKET_X_OFF = 0.10846   # 로컬 원점→중심 x오프셋 (무회전 기준)
-BASKET_HALF_LEN = 0.303  # 로컬 x 반길이 (손잡이 포함)
-BASKET_Z_MIN = -0.0062   # 로컬 바닥면(원점 기준)
-BASKET_W = 0.171         # 바스켓 폭(월드 Y로 나란히 배치할 때 사용)
+# 바스켓 에셋을 "튀김바스켓.step"(얕은 트레이 몸통 + 위로 둥근 스트랩 손잡이)로 교체. 변환 시 긴 축이
+# 로컬 +X를 향하도록 미리 회전해둬서 예전과 동일한 "손잡이 로컬 +X" 관례를 그대로 씀.
+# 실측(STL) 기준 로컬 치수: x:[-0.3272,0.2321](몸통 x:-0.327~-0.124, 손잡이 x:-0.03~+0.232), y:[-0.0825,0.0825], z:[-0.1719,0.0970]
+BASKET_X_OFF = -0.0475    # 로컬 원점→중심 x오프셋 (무회전 기준, 몸통 쪽으로 치우쳐 음수)
+BASKET_HALF_LEN = 0.2797  # 로컬 x 반길이 (손잡이 포함)
+BASKET_Z_MIN = -0.1719    # 로컬 바닥면(원점 기준)
+BASKET_W = 0.165          # 바스켓 폭(월드 Y로 나란히 배치할 때 사용)
 BASKET_HANDLE_ROT = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), np.pi)  # 손잡이(로컬 +X)가 로봇팔 쪽(-X)을 향하도록 180도 회전
 
-# 튀김기 상판은 평평한 한 면이 아니라 2단 구조: 대부분(로컬 y:0~0.513, 회전 후 월드 x:fryer_p.x~+0.513)은
-# 로컬 z=0.85(메인 상판)이고, 앞쪽 얇은 턱(로컬 y:0.573~0.6, 월드 x:+0.573~+0.6쪽)만 z=1.0(전체 높이)로 15cm 더 높다.
-# 바스켓 길이(0.606m)가 메인 상판 폭(0.513m)보다 길어서 그 턱에 살짝 걸치면 스폰 시 겹쳐서(관통) 튕겨나간다.
-# → 바스켓 열의 중심을 턱 쪽 경계에서 半길이+여유만큼 뒤로 물려서, 턱과는 안 겹치고 뒤쪽(개방된 면)으로만 살짝 걸치게 배치.
-fryer_top_z = FLOOR_Z_OFFSET + 0.85
-FLAT_TOP_X_MAX = fryer_cx + 0.213   # 메인 상판과 턱의 경계(월드 x)
-basket_row_cx = FLAT_TOP_X_MAX - BASKET_HALF_LEN - 0.01  # 턱과 1cm 여유
-NUM_BASKETS = 4
-BASKET_SPACING = 0.20   # 겹치지 않게 여유(바스켓 폭 0.171m보다 약간 큼)
-bottom_z = fryer_top_z  # 쌓지 않고 튀김기 상판 위에 한 줄로
-for i in range(NUM_BASKETS):
-    y_off = (i - (NUM_BASKETS - 1) / 2) * BASKET_SPACING
-    # 180도 회전이므로 중심 기준 원점 오프셋 부호가 반대가 됨: center - BASKET_X_OFF → center + BASKET_X_OFF
-    pose = gymapi.Transform(
-        p=gymapi.Vec3(basket_row_cx + BASKET_X_OFF, fryer_cy + y_off, bottom_z - BASKET_Z_MIN),
-        r=BASKET_HANDLE_ROT,
-    )
-    gym.create_actor(env, basket_asset, pose, f"fryer_basket_{i}", 0, 0)
 
 # 선반 대용으로 worktable2를 로봇팔 오른쪽(-Y)과 뒤(-X)에 각각 1개씩(총 2개) 배치.
 # worktable2(0.9x0.6x0.95m)는 cargo_shelf보다 작아 스탠드/튀김기/작업대와 겹치지 않고 바닥 안에(뒤쪽만 살짝 걸침) 들어간다.
@@ -144,14 +130,20 @@ arm = DoosanController(
     spawn_transform=gymapi.Transform(p=gymapi.Vec3(0, 0, BASE_Z)),
 )
 
+# 에어컴프레셔를 새 모델(air_compressor_model_make.step, 0.483x0.447x0.721m)로 교체.
+# 원점이 바운딩박스 어디에도 안 맞아서(x:-0.013~0.483,y:-0.27~0.177,z:-0.249~0.472) 바닥면(z=0.02)에
+# 발판이 닿고 XY는 박스 중심이 스탠드 중앙(0,0)에 오도록 오프셋 보정. 높이 0.72m는 스탠드 마운트면
+# (z=BASE_Z=0.81)까지 약 7cm 여유로 들어간다.
 comp_opts = gymapi.AssetOptions(); comp_opts.fix_base_link = True
-comp_asset = gym.load_asset(sim, asset_root, "urdf/air_compressor/air_compressor.urdf", comp_opts)
-gym.create_actor(env, comp_asset, gymapi.Transform(p=gymapi.Vec3(0, 0, 0.02)), "air_compressor", 0, 0)
+comp_asset = gym.load_asset(sim, asset_root, "urdf/air_compressor_new/air_compressor_new.urdf", comp_opts)
+COMP_BOTTOM_Z = 0.02 - (-0.2489)   # 바닥에서 2cm 띄운 높이에 밑면(zmin=-0.2489)을 맞춤
+gym.create_actor(env, comp_asset, gymapi.Transform(p=gymapi.Vec3(-0.2286, 0.0464, COMP_BOTTOM_Z)), "air_compressor", 0, 0)
 
-# 미니PC(Mini_PC, STEP→URDF 변환). 스탠드 수납공간 안, 에어컴프레셔(x:-0.23~0.23,y:-0.16~0.16) 옆 빈 자리에 배치.
+# 미니PC(Mini_PC, STEP→URDF 변환). 스탠드 수납공간 안, 새 컴프레셔(x:-0.24~0.24,y:-0.22~0.22)를
+# 피해 더 바깥쪽(y=0.32)으로 옮김(기존 y=0.22는 커진 컴프레셔와 겹침).
 pc_opts = gymapi.AssetOptions(); pc_opts.fix_base_link = True
 pc_asset = gym.load_asset(sim, asset_root, "urdf/mini_pc/mini_pc.urdf", pc_opts)
-gym.create_actor(env, pc_asset, gymapi.Transform(p=gymapi.Vec3(0, 0.22, 0.02)), "mini_pc", 0, 0)
+gym.create_actor(env, pc_asset, gymapi.Transform(p=gymapi.Vec3(0, 0.32, 0.02)), "mini_pc", 0, 0)
 
 # 태블릿(Tablet, STEP→URDF 변환). 왼쪽 작업대(worktable2_left) 뒤편(월드 y:1.16~1.2, 로컬 상판보다 10cm 더 높은
 # 얇은 뒷턱/기둥, 상판 y:0~0.56은 z=0.85·뒤턱만 z=0.95)의 위쪽(z=0.95)에 세워서 붙임.
@@ -190,13 +182,11 @@ stand_flat_top_z = 0.85 + 0.004  # 박스 충돌 바닥판 윗면
 NUM_STAND_BASKETS = 4
 STAND_BASKET_SPACING = 0.2
 # 기존 180도(손잡이 -X)에서 제자리 시계방향(위에서 볼 때) 90도 추가 회전 → 절대각 90도.
-# 90도 회전하면 바스켓 긴 축(0.606m)이 Y방향이 되는데, 앞쪽 물결벽(y=-0.597)~뒤쪽 고리(y=-1.155)
-# 안전지대 폭이 0.558m뿐이라 완전히는 못 들어가고 양쪽에 2.4cm씩 걸침(불가피, 물리적으로 꽉 낌).
-# 안전지대 중앙(y=-0.876)에 두고 두 바스켓은 짧은 축(0.171m) 방향인 X로 나란히 배치했었는데,
-# 로봇팔 쪽(+Y)으로 3cm 당김(뒤쪽 고리 겹침은 없어지고 앞쪽 물결벽 쪽만 살짝 걸침) → 오히려
-# 드리프트/기울기 거의 0으로 더 안정적으로 안착함(시뮬레이션 확인).
+# 90도 회전하면 바스켓 긴 축이 Y방향이 되는데, 새 바스켓 길이(0.559m)가 앞쪽 물결벽(y=-0.597)~
+# 뒤쪽 고리(y=-1.155) 안전지대 폭(0.558m)과 거의 정확히 같아서 안전지대 중앙(y=-0.876)에 두면
+# 겹침이 사실상 0(예전 바스켓 0.606m 때는 양쪽 2.4cm씩 억지로 끼워 넣었음).
 STAND_BASKET_ROT2 = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), np.pi / 2)
-stand_basket_center_y = -0.703
+stand_basket_center_y = -0.876
 for i in range(NUM_STAND_BASKETS):
     local_x = (i - (NUM_STAND_BASKETS - 1) / 2) * STAND_BASKET_SPACING  # -0.1, +0.1
     pose = gymapi.Transform(
@@ -209,6 +199,13 @@ for i in range(NUM_STAND_BASKETS):
 # 거치대도 무회전으로 두면 고리(로컬 y=0.323)가 그대로 +y로 향해 턱과 맞음. 오른쪽과 동일하게 고리가
 # 턱 발자국을 완전히 덮도록(고리 뒷면이 y=1.2에 맞닿도록) 배치.
 gym.create_actor(env, fry_stand_asset, gymapi.Transform(p=gymapi.Vec3(0, 0.877, 0.85)), "fry_stand_left", 0, 0)
+
+# 두산 로봇팔 컨트롤러(Doosan_Robotics_A-Model_Controller, STEP→URDF 변환, 0.482x0.210x0.337m).
+# 바닥 뒤쪽(-X) 벽에 브루잉머신 때와 같은 방식으로 붙임(긴 축이 벽과 나란하도록 -90도 회전).
+ctrl_opts = gymapi.AssetOptions(); ctrl_opts.fix_base_link = True
+ctrl_asset = gym.load_asset(sim, asset_root, "urdf/doosan_controller/doosan_controller.urdf", ctrl_opts)
+CTRL_ROT = gymapi.Quat.from_axis_angle(gymapi.Vec3(0, 0, 1), -np.pi / 2)
+gym.create_actor(env, ctrl_asset, gymapi.Transform(p=gymapi.Vec3(-0.8703, 0.2029, FLOOR_Z_OFFSET), r=CTRL_ROT), "doosan_controller", 0, 0)
 
 # ============================================================ [3] 동역학 텐서(OSC)
 gym.prepare_sim(sim)

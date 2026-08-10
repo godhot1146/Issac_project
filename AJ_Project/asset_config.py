@@ -75,3 +75,4 @@ def get_asset_root():
 if __name__ == "__main__":
     # 단독 실행 시 현재 해석되는 경로 확인용
     print("asset_root =", get_asset_root())
+
