@@ -120,6 +120,10 @@ basket_asset = gym.load_asset(sim, asset_root, "urdf/grill_basket/grill_basket.u
 # 하중면 아님) — 콜리전을 얇은 판(0~5mm)으로 수정했으므로 바스켓은 그 위(5mm)에 안착.
 TABLE_TOP_Z = 0.85           # work_table 실제 상판 높이
 RACK_TOP_Z = TABLE_TOP_Z + 0.005   # + grill_rack 바닥판 두께(0.005)
+BASKET_LEN = 0.532   # grill_basket 길이(DoubleGrillBasket.step 개정판, 이전 0.537에서 변경)
+# grill_rack 테두리의 사다리꼴 홈(바스켓 손잡이가 걸리는 자리) 2개 간격 — 삼각형 위치 분석으로
+# 실측(로컬 x=±0.225, 회전 후 dy축에 대응) → 기존 ±0.2 대신 이 값을 써야 홈에 정확히 걸림.
+NOTCH_SPACING = 0.225
 
 def spawn_zone(center, name_prefix, basket_flip, table_rot=ROT270):
     """work_table(받침대) → grill_rack(거치대) → 바스켓 2개, 3단으로 쌓아 배치.
@@ -137,14 +141,17 @@ def spawn_zone(center, name_prefix, basket_flip, table_rot=ROT270):
     gym.create_actor(env, rack_asset,
                       gymapi.Transform(p=gymapi.Vec3(cx - rack_off[0], cy - rack_off[1], TABLE_TOP_Z), r=table_rot),
                       f"{name_prefix}_rack", 0, 0)
-    bx = cx + 0.537 / 2 if basket_flip else cx - 0.537 / 2
+    bx = (cx + BASKET_LEN / 2 if basket_flip else cx - BASKET_LEN / 2) + (-0.2 if basket_flip else 0.2)
     basket_rot = ROT180 if basket_flip else gymapi.Quat()  # gymapi.Quat() = identity(무회전)
-    for i, dy in enumerate([-0.2, 0.2]):
+    for i, dy in enumerate([-NOTCH_SPACING, NOTCH_SPACING]):
         gym.create_actor(env, basket_asset, gymapi.Transform(
             p=gymapi.Vec3(bx, cy + dy, RACK_TOP_Z + 0.03), r=basket_rot),
             f"{name_prefix}_basket_{i}", 0, 0)
 
-spawn_zone(DONE_CENTER, "done", basket_flip=False, table_rot=ROT90)   # 방향 반대(요청 반영)
+# 바스켓 손잡이(힌지+레버, 삼각형 면적분석으로 로컬 x=0.42~0.51 구간에 있음 확인)가 랙 테두리
+# 홈 쪽으로 오도록 flip 지정 — 완료(서쪽 노치)는 flip=True, 준비(동쪽 노치)는 flip=False일 때
+# 손잡이가 노치 가장자리에서 ~7~8cm 이내로 들어옴(반대 flip은 40cm+ 벌어짐).
+spawn_zone(DONE_CENTER, "done", basket_flip=False, table_rot=ROT90)
 spawn_zone(READY_CENTER, "ready", basket_flip=True)
 
 # ============================================================ [3] 동역학 텐서(OSC)
