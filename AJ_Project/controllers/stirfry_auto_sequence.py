@@ -71,7 +71,6 @@ class StirfryAutoSequence:
     DIAGONAL_CONTACT_ERROR = 0.007
     DIAGONAL_CONTACT_ORIENTATION_DEG = 2.0
     FINAL_LOCK_ROTATION_DEG = 2.5
-    MICRO_TEST_LIFT_HEIGHT = 0.010
     TEST_LIFT_HEIGHT = 0.04
     INTERMEDIATE_LIFT_HEIGHT = 0.15
     LIFT_HEIGHT = 0.45
@@ -594,9 +593,6 @@ class StirfryAutoSequence:
             )
         )
 
-        micro_lifted_origin = seated_origin + np.array(
-            [0.0, 0.0, self.MICRO_TEST_LIFT_HEIGHT]
-        )
         test_lifted_origin = seated_origin + np.array(
             [0.0, 0.0, self.TEST_LIFT_HEIGHT]
         )
@@ -619,15 +615,6 @@ class StirfryAutoSequence:
                     seated_origin,
                     seated_R,
                     checkpoint="lock_inspection",
-                    position_tolerance=0.002,
-                    orientation_tolerance_deg=0.5,
-                ),
-                stage(
-                    "파지 확인용 10mm 미세 상승",
-                    1.5,
-                    micro_lifted_origin,
-                    seated_R,
-                    checkpoint="micro_lift",
                     position_tolerance=0.002,
                     orientation_tolerance_deg=0.5,
                 ),
@@ -776,10 +763,9 @@ class StirfryAutoSequence:
             self._print_grasp_diagnostics(stage)
 
         lift_checks = {
-            "micro_lift": ("10mm 미세 상승", self.MICRO_TEST_LIFT_HEIGHT),
             "test_lift": (
                 "40mm 시험 상승",
-                self.TEST_LIFT_HEIGHT - self.MICRO_TEST_LIFT_HEIGHT,
+                self.TEST_LIFT_HEIGHT,
             ),
             "intermediate_lift": (
                 "150mm 중간 상승",
