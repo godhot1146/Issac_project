@@ -119,11 +119,7 @@ class StirfryAutoSequence:
         self.initial_bowl_z = None
 
         self.arm.go_joints(self.HOME_Q)
-        self.auto_control = StirfryAutoJointControl(
-            self.arm,
-            kp=self.arm.kp,
-            kd=self.arm.kd,
-        )
+        self.auto_control = StirfryAutoJointControl(self.arm)
         self.auto_control.command(self.HOME_Q)
         print(
             "[자동] 원본 크기 조리 그릇 1개를 대상으로 접촉 기반 파지·붓기를 시작합니다."
@@ -450,8 +446,12 @@ class StirfryAutoSequence:
                 f"{np.round(self.auto_control.last_gravity_torque, 1)} Nm"
             )
             print(
-                "  최종 명령 토크 = "
-                f"{np.round(self.auto_control.last_command_torque, 1)} Nm"
+                "  중력보상 목표각 보정 = "
+                f"{np.round(np.rad2deg(self.auto_control.last_position_bias), 2)} deg"
+            )
+            print(
+                "  위치 드라이브 명령각 = "
+                f"{np.round(np.rad2deg(self.auto_control.last_drive_target), 1)} deg"
             )
 
     def _print_grasp_diagnostics(self, stage):
