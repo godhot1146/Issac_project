@@ -67,6 +67,9 @@ class StirfryAutoSequence:
     DIAGONAL_SEAT_CYCLES = 3
     DIAGONAL_CENTER_ADVANCE = 0.005
     DIAGONAL_DESCENT = 0.010
+    DIAGONAL_POSITION_TOLERANCE = 0.006
+    DIAGONAL_CONTACT_ERROR = 0.007
+    DIAGONAL_CONTACT_ORIENTATION_DEG = 2.0
     FINAL_LOCK_ROTATION_DEG = 2.5
     MICRO_TEST_LIFT_HEIGHT = 0.010
     TEST_LIFT_HEIGHT = 0.04
@@ -263,14 +266,17 @@ class StirfryAutoSequence:
                 f"[자동][도착 대기 {report_second:02d}s] {stage.name}: "
                 f"위치 {position_error * 1000:.1f} mm, 자세 {orientation_error:.2f} deg"
             )
-        contact_seating_checkpoints = {
-            "diagonal_seat",
-            "final_lock_rotation",
-        }
-        if (
-            stage.checkpoint in contact_seating_checkpoints
+        diagonal_contact = (
+            stage.checkpoint == "diagonal_seat"
             and self.arrival_wait >= 0.8
-        ):
+            and position_error >= self.DIAGONAL_CONTACT_ERROR
+            and orientation_error <= self.DIAGONAL_CONTACT_ORIENTATION_DEG
+        )
+        final_lock_contact = (
+            stage.checkpoint == "final_lock_rotation"
+            and self.arrival_wait >= 0.8
+        )
+        if diagonal_contact or final_lock_contact:
             print(
                 "[자동][하부 훅 안착 저항] "
                 f"{stage.name}: 위치 오차 {position_error * 1000:.1f} mm, "
@@ -534,12 +540,12 @@ class StirfryAutoSequence:
                     f"대각선 안착 {cycle}/{self.DIAGONAL_SEAT_CYCLES}: "
                     f"중심 {self.DIAGONAL_CENTER_ADVANCE * 1000:.0f}mm + "
                     f"하강 {self.DIAGONAL_DESCENT * 1000:.0f}mm",
-                    2.0,
+                    3.0,
                     seated_origin,
                     seated_R,
                     checkpoint="diagonal_seat",
-                    position_tolerance=0.002,
-                    orientation_tolerance_deg=0.5,
+                    position_tolerance=self.DIAGONAL_POSITION_TOLERANCE,
+                    orientation_tolerance_deg=1.0,
                 )
             )
             stages.append(
