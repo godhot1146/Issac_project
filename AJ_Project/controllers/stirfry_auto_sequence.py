@@ -16,6 +16,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from isaacgym import gymapi
 
+from stirfry_auto_control import StirfryAutoJointControl
+
 
 @dataclass(frozen=True)
 class _PoseStage:
@@ -117,6 +119,12 @@ class StirfryAutoSequence:
         self.initial_bowl_z = None
 
         self.arm.go_joints(self.HOME_Q)
+        self.auto_control = StirfryAutoJointControl(
+            self.arm,
+            kp=self.arm.kp,
+            kd=self.arm.kd,
+        )
+        self.auto_control.command(self.HOME_Q)
         print(
             "[자동] 원본 크기 조리 그릇 1개를 대상으로 접촉 기반 파지·붓기를 시작합니다."
         )
@@ -124,6 +132,7 @@ class StirfryAutoSequence:
     def update(self):
         """시뮬레이션 루프에서 물리 스텝 전에 매 프레임 한 번 호출한다."""
         if self.finished:
+            self.auto_control.update()
             return
 
         if self.stage_index < 0:
@@ -134,6 +143,8 @@ class StirfryAutoSequence:
         alpha = min(1.0, self.stage_elapsed / stage.duration_s)
         alpha = alpha * alpha * (3.0 - 2.0 * alpha)  # smoothstep
         self._command_stage(stage, alpha)
+        if self.finished:
+            return
 
         if self.stage_elapsed + 1.0e-9 < stage.duration_s:
             self.stage_elapsed += self.dt
@@ -173,7 +184,7 @@ class StirfryAutoSequence:
             target_joints = self._lerp(
                 self.stage_start_joints, stage.joint_target, alpha
             )
-            self.arm.go_joints(target_joints)
+            self.auto_control.command(target_joints)
             return
 
         target_position = self._lerp(
@@ -182,10 +193,21 @@ class StirfryAutoSequence:
         target_orientation = self._slerp_matrix(
             self.stage_start_orientation, stage.orientation, alpha
         )
-        self.arm.go_cartesian(target_position, target_R=target_orientation)
+        target_joints, _, ik_error_mm = self.arm.solve_ik(
+            target_position,
+            target_R=target_orientation,
+            seed_6=self.arm._last_q,
+        )
+        if not np.all(np.isfinite(target_joints)) or ik_error_mm > 8.0:
+            self._fail(
+                f"'{stage.name}' 이동 중 IK 실패: 위치 오차 {ik_error_mm:.2f} mm"
+            )
+            return
+        self.arm._last_q = target_joints.copy()
+        self.auto_control.command(target_joints)
 
     def _update_home(self):
-        self.arm.go_joints(self.HOME_Q)
+        self.auto_control.command(self.HOME_Q)
         self.home_frame += 1
         if self.home_frame < self.home_frames:
             return
@@ -418,6 +440,19 @@ class StirfryAutoSequence:
             f"자세 오차 = {orientation_error:.2f} deg"
         )
         print(f"  실제 관절각 = {np.round(np.rad2deg(self.arm.current_joints()), 1)} deg")
+        if self.auto_control.target is not None:
+            print(
+                "  목표 관절각 = "
+                f"{np.round(np.rad2deg(self.auto_control.target), 1)} deg"
+            )
+            print(
+                "  중력보상 토크 = "
+                f"{np.round(self.auto_control.last_gravity_torque, 1)} Nm"
+            )
+            print(
+                "  최종 명령 토크 = "
+                f"{np.round(self.auto_control.last_command_torque, 1)} Nm"
+            )
 
     def _print_grasp_diagnostics(self, stage):
         self._print_pose_diagnostics(stage)
@@ -441,6 +476,7 @@ class StirfryAutoSequence:
         )
 
     def _fail(self, message):
+        self.auto_control.capture_current_target()
         self.failed = True
         self.finished = True
         print(f"[자동][실패] {message}")
