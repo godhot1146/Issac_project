@@ -33,6 +33,8 @@ class _PoseStage:
     pivot_start_deg: object = None
     pivot_end_deg: object = None
     contact_seek: bool = False
+    position_tolerance: object = None
+    orientation_tolerance_deg: object = None
 
 
 class StirfryAutoSequence:
@@ -62,7 +64,12 @@ class StirfryAutoSequence:
     UPPER_INSERT_CLEARANCE = 0.010
     UPPER_CENTER_DESCENT = 0.007326201
     UPPER_CONTACT_MAX_DESCENT = 0.050
+    LOWER_SEAT_CYCLES = 3
+    LOWER_SEAT_ROTATION_DEG = 1.5
+    LOWER_SEAT_DESCENT = 0.004
+    MICRO_TEST_LIFT_HEIGHT = 0.010
     TEST_LIFT_HEIGHT = 0.04
+    INTERMEDIATE_LIFT_HEIGHT = 0.15
     LIFT_HEIGHT = 0.45
     POUR_DEG = 50.0
 
@@ -79,8 +86,10 @@ class StirfryAutoSequence:
     CONTACT_DETECT_ERROR = 0.006
     CONTACT_DETECT_HOLD_S = 0.6
     CONTACT_DETECT_ORIENTATION_DEG = 3.0
-    TEST_LIFT_MIN_RISE = 0.015
-    FULL_LIFT_MIN_RISE = 0.30
+    LIFT_MIN_COMMAND_FRACTION = 0.70
+    LIFT_MIN_FOLLOW_RATIO = 0.70
+    LIFT_MAX_RELATIVE_POSITION_DRIFT = 0.008
+    LIFT_MAX_RELATIVE_ORIENTATION_DRIFT_DEG = 6.0
 
     # 통합 URDF의 link_6 -> gripper fixed joint.
     LINK6_TO_GRIPPER_POSITION = np.array([0.0, 0.0, 0.016], dtype=np.float64)
@@ -143,9 +152,13 @@ class StirfryAutoSequence:
         self.stage_start_position = None
         self.stage_start_orientation = None
         self.stage_start_joints = None
+        self.stage_start_bowl_position = None
+        self.stage_start_gripper_position = None
+        self.stage_start_bowl_in_gripper = None
+        self.stage_start_bowl_orientation_in_gripper = None
         self.finished = False
         self.failed = False
-        self.initial_bowl_z = None
+        self.expected_seated_bowl_in_gripper = None
         self.command_position = None
         self.command_orientation = None
         self.contact_stall_time = 0.0
@@ -220,9 +233,19 @@ class StirfryAutoSequence:
         # 예정 시간이 지난 뒤에는 실제 rigid body가 목표에 도착할 때까지
         # 최종 명령을 유지한다. 로그의 단계 번호만 진행하는 상황을 막는다.
         position_error, orientation_error = self._stage_error(stage)
+        position_tolerance = (
+            self.POSITION_TOLERANCE
+            if stage.position_tolerance is None
+            else float(stage.position_tolerance)
+        )
+        orientation_tolerance = (
+            self.ORIENTATION_TOLERANCE_DEG
+            if stage.orientation_tolerance_deg is None
+            else float(stage.orientation_tolerance_deg)
+        )
         if (
-            position_error <= self.POSITION_TOLERANCE
-            and orientation_error <= self.ORIENTATION_TOLERANCE_DEG
+            position_error <= position_tolerance
+            and orientation_error <= orientation_tolerance
         ):
             print(
                 f"[자동][도착] {stage.name}: 위치 {position_error * 1000:.1f} mm, "
@@ -239,6 +262,19 @@ class StirfryAutoSequence:
                 f"[자동][도착 대기 {report_second:02d}s] {stage.name}: "
                 f"위치 {position_error * 1000:.1f} mm, 자세 {orientation_error:.2f} deg"
             )
+        if (
+            stage.checkpoint in {"lower_seat_rotation", "lower_seat_descent"}
+            and self.arrival_wait >= 0.8
+        ):
+            print(
+                "[자동][하부 훅 안착 저항] "
+                f"{stage.name}: 위치 오차 {position_error * 1000:.1f} mm, "
+                f"자세 오차 {orientation_error:.2f} deg. "
+                "실제 정지 자세를 접촉 위치로 사용합니다."
+            )
+            self._rebase_future_from_actual_stage(stage)
+            self._finish_stage(stage)
+            return
         if self.arrival_wait >= self.ARRIVAL_TIMEOUT_S:
             self._print_pose_diagnostics(stage)
             self._fail(
@@ -290,7 +326,6 @@ class StirfryAutoSequence:
             return
 
         bowl_position = self._bowl_position()
-        self.initial_bowl_z = float(bowl_position[2])
         self.stages = self._build_stages(bowl_position)
         self._validate_goals()
         print(
@@ -354,13 +389,6 @@ class StirfryAutoSequence:
         precontact_origin = entry_origin + np.array(
             [0.0, 0.0, self.UPPER_PRECONTACT_CLEARANCE]
         )
-        test_lifted_origin = locked_origin + np.array(
-            [0.0, 0.0, self.TEST_LIFT_HEIGHT]
-        )
-        lifted_origin = locked_origin + np.array([0.0, 0.0, self.LIFT_HEIGHT])
-
-        pour_R = self._gripper_rotation(self.LOCK_DEG + self.POUR_DEG)
-
         def stage(
             name,
             duration_s,
@@ -373,6 +401,8 @@ class StirfryAutoSequence:
             pivot_start_deg=None,
             pivot_end_deg=None,
             contact_seek=False,
+            position_tolerance=None,
+            orientation_tolerance_deg=None,
         ):
             link_position, link_orientation = self._link6_pose(
                 gripper_position, gripper_orientation
@@ -389,6 +419,8 @@ class StirfryAutoSequence:
                 pivot_start_deg=pivot_start_deg,
                 pivot_end_deg=pivot_end_deg,
                 contact_seek=contact_seek,
+                position_tolerance=position_tolerance,
+                orientation_tolerance_deg=orientation_tolerance_deg,
             )
 
         staging_position, staging_orientation = self._link6_pose(
@@ -404,7 +436,7 @@ class StirfryAutoSequence:
                 f"elbow-up staging IK 실패: 위치 오차 {staging_error:.2f} mm"
             )
 
-        return [
+        stages = [
             stage(
                 "그릇 위 수직 파지 대기(elbow-up)",
                 4.0,
@@ -474,33 +506,141 @@ class StirfryAutoSequence:
                 checkpoint="lower_hook_contact_seek",
                 contact_seek=True,
             ),
-            stage(
-                "위·아래 걸림 검사 및 안정화",
-                3.0,
-                locked_origin,
-                lock_R,
-                checkpoint="lock_inspection",
-            ),
-            stage(
-                "파지 확인용 4cm 시험 상승",
-                2.0,
-                test_lifted_origin,
-                lock_R,
-                checkpoint="test_lift",
-            ),
-            stage(
-                "그릇 본 상승",
-                4.0,
-                lifted_origin,
-                lock_R,
-                checkpoint="full_lift",
-            ),
-            stage("들림 상태 안정화", 1.0, lifted_origin, lock_R),
-            stage("손목을 기울여 붓기", 4.0, lifted_origin, pour_R),
-            stage("붓는 자세 유지", 2.0, lifted_origin, pour_R),
-            stage("손목 원위치", 4.0, lifted_origin, lock_R),
-            stage("완료 자세 유지", 1.0, lifted_origin, lock_R),
         ]
+
+        # 큰 잠금 회전만으로는 하부 훅이 그릇 밑면에 얕게 걸릴 수 있다.
+        # 잠금 자세에서 1.5도 회전과 4 mm 하강을 세 번 번갈아 수행해
+        # 상부 림 접점을 유지하면서 하부 훅을 단계적으로 더 깊게 안착시킨다.
+        seat_pivot_world = upper_seat_pivot_world.copy()
+        seat_start_deg = self.LOCK_DEG
+        seated_origin = locked_origin.copy()
+        seated_R = lock_R.copy()
+        for cycle in range(1, self.LOWER_SEAT_CYCLES + 1):
+            seat_end_deg = self.LOCK_DEG - cycle * self.LOWER_SEAT_ROTATION_DEG
+            seated_R = self._gripper_rotation(seat_end_deg)
+            rotated_origin = (
+                seat_pivot_world - seated_R @ self.UPPER_HOOK_SEAT_LOCAL
+            )
+            stages.append(
+                stage(
+                    f"하부 훅 안착 {cycle}/{self.LOWER_SEAT_CYCLES}: "
+                    f"안쪽으로 {self.LOWER_SEAT_ROTATION_DEG:.1f}도 회전",
+                    1.5,
+                    rotated_origin,
+                    seated_R,
+                    pivot_world=seat_pivot_world,
+                    pivot_local=self.UPPER_HOOK_SEAT_LOCAL,
+                    pivot_start_deg=seat_start_deg,
+                    pivot_end_deg=seat_end_deg,
+                    checkpoint="lower_seat_rotation",
+                    position_tolerance=0.002,
+                    orientation_tolerance_deg=0.5,
+                )
+            )
+            seated_origin = (
+                rotated_origin
+                - self.bowl_frame[:, 2] * self.LOWER_SEAT_DESCENT
+            )
+            stages.append(
+                stage(
+                    f"하부 훅 안착 {cycle}/{self.LOWER_SEAT_CYCLES}: "
+                    f"수직 {self.LOWER_SEAT_DESCENT * 1000:.0f}mm 하강",
+                    1.5,
+                    seated_origin,
+                    seated_R,
+                    checkpoint="lower_seat_descent",
+                    position_tolerance=0.002,
+                    orientation_tolerance_deg=0.5,
+                )
+            )
+            stages.append(
+                stage(
+                    f"하부 훅 안착 {cycle}/{self.LOWER_SEAT_CYCLES}: 안정화",
+                    0.8,
+                    seated_origin,
+                    seated_R,
+                    position_tolerance=0.002,
+                    orientation_tolerance_deg=0.5,
+                )
+            )
+            seat_pivot_world = (
+                seat_pivot_world
+                - self.bowl_frame[:, 2] * self.LOWER_SEAT_DESCENT
+            )
+            seat_start_deg = seat_end_deg
+
+        micro_lifted_origin = seated_origin + np.array(
+            [0.0, 0.0, self.MICRO_TEST_LIFT_HEIGHT]
+        )
+        test_lifted_origin = seated_origin + np.array(
+            [0.0, 0.0, self.TEST_LIFT_HEIGHT]
+        )
+        intermediate_lifted_origin = seated_origin + np.array(
+            [0.0, 0.0, self.INTERMEDIATE_LIFT_HEIGHT]
+        )
+        lifted_origin = seated_origin + np.array(
+            [0.0, 0.0, self.LIFT_HEIGHT]
+        )
+        seated_lock_deg = (
+            self.LOCK_DEG
+            - self.LOWER_SEAT_CYCLES * self.LOWER_SEAT_ROTATION_DEG
+        )
+        self.expected_seated_bowl_in_gripper = seated_R.T @ (
+            bowl_position - seated_origin
+        )
+        pour_R = self._gripper_rotation(seated_lock_deg + self.POUR_DEG)
+
+        stages.extend(
+            [
+                stage(
+                    "위·아래 걸림 검사 및 안정화",
+                    2.0,
+                    seated_origin,
+                    seated_R,
+                    checkpoint="lock_inspection",
+                    position_tolerance=0.002,
+                    orientation_tolerance_deg=0.5,
+                ),
+                stage(
+                    "파지 확인용 10mm 미세 상승",
+                    1.5,
+                    micro_lifted_origin,
+                    seated_R,
+                    checkpoint="micro_lift",
+                    position_tolerance=0.002,
+                    orientation_tolerance_deg=0.5,
+                ),
+                stage(
+                    "파지 확인용 40mm 시험 상승",
+                    2.0,
+                    test_lifted_origin,
+                    seated_R,
+                    checkpoint="test_lift",
+                    position_tolerance=0.003,
+                    orientation_tolerance_deg=0.7,
+                ),
+                stage(
+                    "중간 높이 150mm 상승",
+                    3.0,
+                    intermediate_lifted_origin,
+                    seated_R,
+                    checkpoint="intermediate_lift",
+                ),
+                stage(
+                    "그릇 본 상승",
+                    6.0,
+                    lifted_origin,
+                    seated_R,
+                    checkpoint="full_lift",
+                ),
+                stage("들림 상태 안정화", 1.0, lifted_origin, seated_R),
+                stage("손목을 기울여 붓기", 4.0, lifted_origin, pour_R),
+                stage("붓는 자세 유지", 2.0, lifted_origin, pour_R),
+                stage("손목 원위치", 4.0, lifted_origin, seated_R),
+                stage("완료 자세 유지", 1.0, lifted_origin, seated_R),
+            ]
+        )
+        return stages
 
     def _gripper_rotation(self, wrist_deg):
         return (
@@ -577,6 +717,20 @@ class StirfryAutoSequence:
         self.stage_start_position = position.astype(np.float64)
         self.stage_start_orientation = orientation.astype(np.float64)
         self.stage_start_joints = self.arm.current_joints().astype(np.float64)
+        bowl_position, bowl_orientation = self._rigid_body_pose(
+            self.bowl_actor, 0
+        )
+        gripper_position, gripper_orientation = self._rigid_body_pose(
+            self.arm.actor, self.gripper_body_index
+        )
+        self.stage_start_bowl_position = bowl_position
+        self.stage_start_gripper_position = gripper_position
+        self.stage_start_bowl_in_gripper = gripper_orientation.T @ (
+            bowl_position - gripper_position
+        )
+        self.stage_start_bowl_orientation_in_gripper = (
+            gripper_orientation.T @ bowl_orientation
+        )
         print(
             f"[자동 {index + 1:02d}/{len(self.stages):02d}] "
             f"{self.stages[index].name}"
@@ -600,22 +754,24 @@ class StirfryAutoSequence:
         if stage.checkpoint == "lock_inspection":
             self._print_grasp_diagnostics(stage)
 
-        if stage.checkpoint == "test_lift":
-            lifted = float(self._bowl_position()[2] - self.initial_bowl_z)
-            print(f"[자동][시험 상승] 실제 그릇 상승량 = {lifted:.3f} m")
-            if lifted < self.TEST_LIFT_MIN_RISE:
-                self._print_grasp_diagnostics(stage)
-                self._fail(
-                    "4cm 시험 상승에서 그릇이 따라오지 않았습니다. "
-                    "파지 위치 근처에서 정지합니다."
-                )
-                return
-
-        if stage.checkpoint == "full_lift":
-            lifted = float(self._bowl_position()[2] - self.initial_bowl_z)
-            print(f"[자동][본 상승] 실제 그릇 상승량 = {lifted:.3f} m")
-            if lifted < self.FULL_LIFT_MIN_RISE:
-                self._fail("본 상승 중 그릇을 놓쳐 붓기를 중단합니다.")
+        lift_checks = {
+            "micro_lift": ("10mm 미세 상승", self.MICRO_TEST_LIFT_HEIGHT),
+            "test_lift": (
+                "40mm 시험 상승",
+                self.TEST_LIFT_HEIGHT - self.MICRO_TEST_LIFT_HEIGHT,
+            ),
+            "intermediate_lift": (
+                "150mm 중간 상승",
+                self.INTERMEDIATE_LIFT_HEIGHT - self.TEST_LIFT_HEIGHT,
+            ),
+            "full_lift": (
+                "450mm 본 상승",
+                self.LIFT_HEIGHT - self.INTERMEDIATE_LIFT_HEIGHT,
+            ),
+        }
+        if stage.checkpoint in lift_checks:
+            label, expected_rise = lift_checks[stage.checkpoint]
+            if not self._validate_lift_follow(stage, label, expected_rise):
                 return
 
         next_index = self.stage_index + 1
@@ -688,36 +844,167 @@ class StirfryAutoSequence:
         )
 
     def _rebase_after_lower_contact(self):
-        """실제 하부 훅 잠금 자세를 기준으로 상승·붓기 경로를 재정렬한다."""
+        """실제 하부 훅 접촉 자세를 기준으로 안착·상승 경로를 재정렬한다."""
+        lock_stage = self.stages[self.stage_index]
+        translation_mm, orientation_delta_deg = (
+            self._rebase_future_from_actual_stage(lock_stage)
+        )
+        print(
+            "[자동][하부 훅 접촉] 실제 접촉 자세를 기준으로 재정렬합니다: "
+            f"위치 보정 {translation_mm:.1f} mm, "
+            f"자세 보정 {orientation_delta_deg:.2f} deg. "
+            f"이 자세에서 {self.LOWER_SEAT_CYCLES}회의 미세 회전·하강 안착을 시작합니다."
+        )
+
+    def _rebase_future_from_actual_stage(self, stage):
+        """접촉으로 목표에 못 간 경우 이후 경로를 실제 정지 자세에 맞춘다."""
         actual_position_world, actual_orientation = self._rigid_body_pose(
             self.arm.actor, self.link6_body_index
         )
-        actual_position = actual_position_world - np.array(
+        base_offset = np.array(
             [0.0, 0.0, self.base_z], dtype=np.float64
         )
-        lock_stage = self.stages[self.stage_index]
-        translation = actual_position - lock_stage.position
-        rotation_delta = actual_orientation @ lock_stage.orientation.T
+        actual_position = actual_position_world - base_offset
+        translation = actual_position - stage.position
+        rotation_delta = actual_orientation @ stage.orientation.T
+
+        actual_gripper_position, actual_gripper_orientation = (
+            self._rigid_body_pose(
+                self.arm.actor, self.gripper_body_index
+            )
+        )
+        planned_gripper_orientation = (
+            stage.orientation @ self.LINK6_TO_GRIPPER_ROTATION
+        )
+        planned_gripper_position = (
+            stage.position
+            + base_offset
+            + stage.orientation @ self.LINK6_TO_GRIPPER_POSITION
+        )
+        actual_pivot_world = (
+            actual_gripper_position
+            + actual_gripper_orientation @ self.UPPER_HOOK_SEAT_LOCAL
+        )
+        planned_pivot_world = (
+            planned_gripper_position
+            + planned_gripper_orientation @ self.UPPER_HOOK_SEAT_LOCAL
+        )
+        pivot_translation = actual_pivot_world - planned_pivot_world
+        actual_wrist_deg = self._wrist_deg(actual_gripper_orientation)
+        planned_wrist_deg = self._wrist_deg(planned_gripper_orientation)
+        pivot_angle_shift = actual_wrist_deg - planned_wrist_deg
 
         for index in range(self.stage_index + 1, len(self.stages)):
             original = self.stages[index]
-            self.stages[index] = replace(
+            pivot_world = original.pivot_world
+            pivot_start_deg = original.pivot_start_deg
+            pivot_end_deg = original.pivot_end_deg
+            if pivot_world is not None:
+                pivot_world = pivot_world + pivot_translation
+                pivot_start_deg = pivot_start_deg + pivot_angle_shift
+                pivot_end_deg = pivot_end_deg + pivot_angle_shift
+            rebased = replace(
                 original,
                 position=(original.position + translation).astype(np.float32),
                 orientation=(rotation_delta @ original.orientation).astype(
                     np.float64
                 ),
+                pivot_world=pivot_world,
+                pivot_start_deg=pivot_start_deg,
+                pivot_end_deg=pivot_end_deg,
             )
+            if rebased.pivot_world is not None:
+                endpoint_position, endpoint_orientation = self._pivot_link6_pose(
+                    rebased, 1.0
+                )
+                rebased = replace(
+                    rebased,
+                    position=endpoint_position.astype(np.float32),
+                    orientation=endpoint_orientation.astype(np.float64),
+                )
+            self.stages[index] = rebased
 
-        orientation_delta_deg = np.degrees(
-            Rotation.from_matrix(rotation_delta).magnitude()
+        translation_mm = float(np.linalg.norm(translation) * 1000.0)
+        orientation_delta_deg = float(
+            np.degrees(Rotation.from_matrix(rotation_delta).magnitude())
+        )
+        return translation_mm, orientation_delta_deg
+
+    def _wrist_deg(self, gripper_orientation):
+        relative_rotation = self.bowl_frame.T @ gripper_orientation
+        return float(
+            np.degrees(
+                np.arctan2(
+                    relative_rotation[0, 2], relative_rotation[0, 0]
+                )
+            )
+        )
+
+    def _validate_lift_follow(self, stage, label, expected_gripper_rise):
+        """상승량뿐 아니라 bowl/gripper 상대 자세가 유지되는지 검사한다."""
+        bowl_position, bowl_orientation = self._rigid_body_pose(
+            self.bowl_actor, 0
+        )
+        gripper_position, gripper_orientation = self._rigid_body_pose(
+            self.arm.actor, self.gripper_body_index
+        )
+        gripper_rise = float(
+            gripper_position[2] - self.stage_start_gripper_position[2]
+        )
+        bowl_rise = float(
+            bowl_position[2] - self.stage_start_bowl_position[2]
+        )
+        follow_ratio = bowl_rise / max(gripper_rise, 1.0e-6)
+        bowl_in_gripper = gripper_orientation.T @ (
+            bowl_position - gripper_position
+        )
+        relative_position_drift = float(
+            np.linalg.norm(
+                bowl_in_gripper - self.stage_start_bowl_in_gripper
+            )
+        )
+        bowl_orientation_in_gripper = (
+            gripper_orientation.T @ bowl_orientation
+        )
+        relative_orientation_drift = float(
+            np.degrees(
+                Rotation.from_matrix(
+                    bowl_orientation_in_gripper
+                    @ self.stage_start_bowl_orientation_in_gripper.T
+                ).magnitude()
+            )
         )
         print(
-            "[자동][하부 훅 잠금] 실제 접촉 자세를 성공으로 인정합니다: "
-            f"위치 보정 {np.linalg.norm(translation) * 1000:.1f} mm, "
-            f"자세 보정 {orientation_delta_deg:.2f} deg. "
-            "이 자세에서 시험 상승을 시작합니다."
+            f"[자동][{label} 추종 검사] 그리퍼 {gripper_rise * 1000:.1f} mm, "
+            f"그릇 {bowl_rise * 1000:.1f} mm, 추종률 {follow_ratio * 100:.1f}%, "
+            f"상대 위치 변화 {relative_position_drift * 1000:.1f} mm, "
+            f"상대 자세 변화 {relative_orientation_drift:.2f} deg"
         )
+
+        minimum_gripper_rise = (
+            expected_gripper_rise * self.LIFT_MIN_COMMAND_FRACTION
+        )
+        if gripper_rise < minimum_gripper_rise:
+            self._print_grasp_diagnostics(stage)
+            self._fail(
+                f"{label}에서 그리퍼가 명령 상승량의 "
+                f"{self.LIFT_MIN_COMMAND_FRACTION * 100:.0f}%에 도달하지 못했습니다."
+            )
+            return False
+        if (
+            follow_ratio < self.LIFT_MIN_FOLLOW_RATIO
+            or relative_position_drift
+            > self.LIFT_MAX_RELATIVE_POSITION_DRIFT
+            or relative_orientation_drift
+            > self.LIFT_MAX_RELATIVE_ORIENTATION_DRIFT_DEG
+        ):
+            self._print_grasp_diagnostics(stage)
+            self._fail(
+                f"{label}에서 그릇이 그리퍼를 안정적으로 따라오지 않아 "
+                "하부 훅 미안착으로 판정합니다."
+            )
+            return False
+        return True
 
     def _stage_error(self, stage):
         actual_position_world, actual_orientation = self._rigid_body_pose(
@@ -781,15 +1068,18 @@ class StirfryAutoSequence:
         bowl_in_gripper = gripper_orientation.T @ (
             bowl_position - gripper_position
         )
-        locked_error = np.linalg.norm(
-            bowl_in_gripper - self.BOWL_FROM_GRIPPER_LOCKED
+        expected_locked = (
+            self.BOWL_FROM_GRIPPER_LOCKED
+            if self.expected_seated_bowl_in_gripper is None
+            else self.expected_seated_bowl_in_gripper
         )
+        locked_error = np.linalg.norm(bowl_in_gripper - expected_locked)
         print("[자동][파지 진단]")
         print(f"  gripper 실제(world) = {np.round(gripper_position, 4)} m")
         print(f"  bowl 실제(world) = {np.round(bowl_position, 4)} m")
         print(f"  gripper 기준 bowl = {np.round(bowl_in_gripper, 4)} m")
         print(
-            f"  CAD 잠금 기준 = {np.round(self.BOWL_FROM_GRIPPER_LOCKED, 4)} m, "
+            f"  미세 안착 목표 = {np.round(expected_locked, 4)} m, "
             f"위치 차이 = {locked_error * 1000:.1f} mm"
         )
 
