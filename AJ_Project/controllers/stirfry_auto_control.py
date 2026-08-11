@@ -12,6 +12,11 @@ class StirfryAutoJointControl:
     """내부 위치제어의 안정성을 유지하며 중력에 의한 정상상태 오차를 줄인다."""
 
     MAX_BIAS_DEG = 10.0
+    # 시뮬레이션 실측: J2는 이론 보정의 100%를 적용했을 때 목표보다
+    # 0.8도 위에 정지했다. 실제 필요한 3.7도 / 계산된 4.5도로 교정한다.
+    GRAVITY_BIAS_SCALE = np.array(
+        [1.0, 0.82, 1.0, 1.0, 1.0, 1.0], dtype=np.float32
+    )
 
     def __init__(self, arm):
         if not arm._osc_ready:
@@ -54,6 +59,9 @@ class StirfryAutoJointControl:
             raise RuntimeError("자동 제어에 필요한 관절 한계를 읽지 못했습니다.")
 
         self.max_bias = np.deg2rad(self.MAX_BIAS_DEG)
+        if self.GRAVITY_BIAS_SCALE.shape != expected_shape:
+            raise RuntimeError("중력보상 관절별 교정값의 축 개수가 맞지 않습니다.")
+        self.gravity_bias_scale = self.GRAVITY_BIAS_SCALE.copy()
         self.target = None
         self.last_gravity_torque = np.zeros(self.arm.num_dofs, dtype=np.float32)
         self.last_position_bias = np.zeros(self.arm.num_dofs, dtype=np.float32)
@@ -62,6 +70,7 @@ class StirfryAutoJointControl:
         print(
             "[자동 제어] 위치 목표 중력보상 활성화 "
             f"(stiffness={np.round(self.stiffness, 1)} Nm/rad, "
+            f"배율={self.gravity_bias_scale}, "
             f"보정 한계=±{self.MAX_BIAS_DEG:.0f} deg)"
         )
 
@@ -94,7 +103,7 @@ class StirfryAutoJointControl:
         # PhysX 위치 드라이브가 만드는 정적 토크는
         # stiffness * (drive_target - actual)이다. 따라서 실제 관절이 원래
         # 목표에 있을 때 gravity 토크가 생기도록 tau_g / stiffness를 더한다.
-        raw_bias = gravity / self.stiffness
+        raw_bias = gravity / self.stiffness * self.gravity_bias_scale
         position_bias = np.clip(raw_bias, -self.max_bias, self.max_bias)
         drive_target = np.clip(
             self.target + position_bias,
