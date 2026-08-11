@@ -150,6 +150,7 @@ class StirfryAutoSequence:
         self.command_orientation = None
         self.contact_stall_time = 0.0
         self.upper_contact_detected = False
+        self.lower_contact_detected = False
 
         self.arm.go_joints(self.HOME_Q)
         self.auto_control = StirfryAutoJointControl(self.arm, dt=self.dt)
@@ -179,22 +180,36 @@ class StirfryAutoSequence:
             command_position_error, command_orientation_error = (
                 self._command_pose_error()
             )
+            orientation_limit = (
+                8.0
+                if stage.checkpoint == "lower_hook_contact_seek"
+                else self.CONTACT_DETECT_ORIENTATION_DEG
+            )
             if (
                 command_position_error >= self.CONTACT_DETECT_ERROR
-                and command_orientation_error
-                <= self.CONTACT_DETECT_ORIENTATION_DEG
+                and command_orientation_error <= orientation_limit
             ):
                 self.contact_stall_time += self.dt
             else:
                 self.contact_stall_time = 0.0
             if self.contact_stall_time >= self.CONTACT_DETECT_HOLD_S:
-                print(
-                    "[자동][천장 접촉 감지] "
-                    f"추종 오차 {command_position_error * 1000:.1f} mm가 "
-                    f"{self.contact_stall_time:.1f}s 지속되어 추가 하강을 멈춥니다."
-                )
-                self.upper_contact_detected = True
-                self._rebase_after_upper_contact()
+                if stage.checkpoint == "lower_hook_contact_seek":
+                    print(
+                        "[자동][하부 훅 접촉 감지] "
+                        f"위치 오차 {command_position_error * 1000:.1f} mm, "
+                        f"자세 오차 {command_orientation_error:.2f} deg가 "
+                        f"{self.contact_stall_time:.1f}s 지속되어 잠금 회전을 멈춥니다."
+                    )
+                    self.lower_contact_detected = True
+                    self._rebase_after_lower_contact()
+                else:
+                    print(
+                        "[자동][천장 접촉 감지] "
+                        f"추종 오차 {command_position_error * 1000:.1f} mm가 "
+                        f"{self.contact_stall_time:.1f}s 지속되어 추가 하강을 멈춥니다."
+                    )
+                    self.upper_contact_detected = True
+                    self._rebase_after_upper_contact()
                 self._finish_stage(stage)
                 return
 
@@ -456,6 +471,8 @@ class StirfryAutoSequence:
                 pivot_local=self.UPPER_HOOK_SEAT_LOCAL,
                 pivot_start_deg=self.UPPER_INWARD_DEG,
                 pivot_end_deg=self.LOCK_DEG,
+                checkpoint="lower_hook_contact_seek",
+                contact_seek=True,
             ),
             stage(
                 "위·아래 걸림 검사 및 안정화",
@@ -668,6 +685,38 @@ class StirfryAutoSequence:
         print(
             f"[자동][천장 접촉] 실제 추가 하강량 = {descent * 1000:.1f} mm, "
             "이 위치를 기준으로 잠금·상승 경로를 재정렬했습니다."
+        )
+
+    def _rebase_after_lower_contact(self):
+        """실제 하부 훅 잠금 자세를 기준으로 상승·붓기 경로를 재정렬한다."""
+        actual_position_world, actual_orientation = self._rigid_body_pose(
+            self.arm.actor, self.link6_body_index
+        )
+        actual_position = actual_position_world - np.array(
+            [0.0, 0.0, self.base_z], dtype=np.float64
+        )
+        lock_stage = self.stages[self.stage_index]
+        translation = actual_position - lock_stage.position
+        rotation_delta = actual_orientation @ lock_stage.orientation.T
+
+        for index in range(self.stage_index + 1, len(self.stages)):
+            original = self.stages[index]
+            self.stages[index] = replace(
+                original,
+                position=(original.position + translation).astype(np.float32),
+                orientation=(rotation_delta @ original.orientation).astype(
+                    np.float64
+                ),
+            )
+
+        orientation_delta_deg = np.degrees(
+            Rotation.from_matrix(rotation_delta).magnitude()
+        )
+        print(
+            "[자동][하부 훅 잠금] 실제 접촉 자세를 성공으로 인정합니다: "
+            f"위치 보정 {np.linalg.norm(translation) * 1000:.1f} mm, "
+            f"자세 보정 {orientation_delta_deg:.2f} deg. "
+            "이 자세에서 시험 상승을 시작합니다."
         )
 
     def _stage_error(self, stage):
