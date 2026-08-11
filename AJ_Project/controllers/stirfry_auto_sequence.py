@@ -1,9 +1,10 @@
 """두산 A0509 볶음 그릇의 접촉 기반 자동 파지·붓기 시퀀스.
 
-이 그리퍼는 열고 닫히는 집게가 아니다. 두꺼운 상부 접촉부를 그릇 림
-위쪽에 먼저 댄 뒤 손목축을 회전해 아래쪽 훅까지 걸리게 하는 고정형
-그리퍼다. 따라서 이 모듈은 bowl actor를 순간이동시키거나 로봇에 가짜로
-고정하지 않고, CAD에서 검증한 상·하 접촉 형상과 PhysX 접촉만 사용한다.
+이 그리퍼는 열고 닫히는 집게가 아니다. 세운 그리퍼의 두꺼운 상부 고리에
+그릇 림을 먼저 끼운 뒤, 그 접점을 유지하며 손목축을 회전해 아래쪽 훅까지
+걸리게 하는 고정형 그리퍼다. 따라서 이 모듈은 bowl actor를 순간이동시키거나
+로봇에 가짜로 고정하지 않고, CAD에서 검증한 상·하 접촉 형상과 PhysX 접촉만
+사용한다.
 
 대상은 그리퍼가 맞도록 설계된 원본 크기(Ø250 mm)의 조리 그릇이다.
 준비 테이블의 재료 그릇들은 0.75배로 축소되어 있어 같은 파지 좌표를
@@ -27,6 +28,9 @@ class _PoseStage:
     orientation: np.ndarray
     joint_target: object = None
     checkpoint: str = ""
+    pivot_world: object = None
+    pivot_start_deg: object = None
+    pivot_end_deg: object = None
 
 
 class StirfryAutoSequence:
@@ -34,22 +38,18 @@ class StirfryAutoSequence:
 
     HOME_Q = np.zeros(6, dtype=np.float32)
 
-    # stirfry_gripper.step / stirfry_bowl.step의 CAD 검증값(m).
-    # 손목각 0도인 gripper frame에서 gripper 원점 -> 정지 bowl 원점.
-    BOWL_FROM_GRIPPER_ZERO = np.array(
-        [0.280512057, 0.0, -0.049234758], dtype=np.float64
-    )
+    # stirfry_gripper.step / stirfry_bowl.step의 잠금 자세 CAD 검증값(m).
     BOWL_FROM_GRIPPER_LOCKED = np.array(
         [0.281884780, 0.0, -0.040645373], dtype=np.float64
     )
 
-    # 3도에서 두꺼운 상부가 먼저 닿고, 1.75도에서 하부까지 걸린다.
-    PRELOCK_DEG = 8.0
-    UPPER_CONTACT_DEG = 3.0
+    # 그리퍼를 세워 위쪽 두꺼운 고리에 림을 먼저 안착한 뒤, 그 접점을
+    # 고정한 원호를 따라 손목을 회전해 아래쪽 훅까지 건다.
+    VERTICAL_ENTRY_DEG = 70.0
     LOCK_DEG = 1.75
 
-    APPROACH_DISTANCE = 0.10
-    STAGING_HEIGHT = 0.25
+    VERTICAL_STAGING_CLEARANCE = 0.18
+    UPPER_PRECONTACT_CLEARANCE = 0.04
     TEST_LIFT_HEIGHT = 0.04
     LIFT_HEIGHT = 0.45
     POUR_DEG = 50.0
@@ -70,6 +70,14 @@ class StirfryAutoSequence:
     # 통합 URDF의 link_6 -> gripper fixed joint.
     LINK6_TO_GRIPPER_POSITION = np.array([0.0, 0.0, 0.016], dtype=np.float64)
     LINK6_TO_GRIPPER_ROTATION = Rotation.from_euler("x", 90.0, degrees=True).as_matrix()
+
+    # CAD 좌표(m): 위쪽 두꺼운 고리의 원통 접촉 중심과 그릇의 가까운 림.
+    # 이 두 점을 일치시키면 70도부터 잠금각까지 회전하는 동안 형상 관통
+    # 없이 upper gap 0.75 mm를 유지하고 lower gap이 37.7 -> 0.78 mm가 된다.
+    UPPER_HOOK_CONTACT_LOCAL = np.array(
+        [0.1545, 0.0, 0.0355], dtype=np.float64
+    )
+    BOWL_NEAR_RIM_LOCAL = np.array([-0.125, 0.0, 0.080], dtype=np.float64)
 
     def __init__(
         self,
@@ -119,7 +127,7 @@ class StirfryAutoSequence:
         self.initial_bowl_z = None
 
         self.arm.go_joints(self.HOME_Q)
-        self.auto_control = StirfryAutoJointControl(self.arm)
+        self.auto_control = StirfryAutoJointControl(self.arm, dt=self.dt)
         self.auto_control.command(self.HOME_Q)
         print(
             "[자동] 원본 크기 조리 그릇 1개를 대상으로 접촉 기반 파지·붓기를 시작합니다."
@@ -176,19 +184,25 @@ class StirfryAutoSequence:
             )
 
     def _command_stage(self, stage, alpha):
+        settling = self.stage_elapsed + 1.0e-9 >= stage.duration_s
         if stage.joint_target is not None:
             target_joints = self._lerp(
                 self.stage_start_joints, stage.joint_target, alpha
             )
-            self.auto_control.command(target_joints)
+            self.auto_control.command(target_joints, settling=settling)
             return
 
-        target_position = self._lerp(
-            self.stage_start_position, stage.position, alpha
-        )
-        target_orientation = self._slerp_matrix(
-            self.stage_start_orientation, stage.orientation, alpha
-        )
+        if stage.pivot_world is not None:
+            target_position, target_orientation = self._pivot_link6_pose(
+                stage, alpha
+            )
+        else:
+            target_position = self._lerp(
+                self.stage_start_position, stage.position, alpha
+            )
+            target_orientation = self._slerp_matrix(
+                self.stage_start_orientation, stage.orientation, alpha
+            )
         target_joints, _, ik_error_mm = self.arm.solve_ik(
             target_position,
             target_R=target_orientation,
@@ -200,7 +214,7 @@ class StirfryAutoSequence:
             )
             return
         self.arm._last_q = target_joints.copy()
-        self.auto_control.command(target_joints)
+        self.auto_control.command(target_joints, settling=settling)
 
     def _update_home(self):
         self.auto_control.command(self.HOME_Q)
@@ -219,28 +233,41 @@ class StirfryAutoSequence:
         self._enter_stage(0)
 
     def _build_stages(self, bowl_position):
-        # bowl은 원형이므로 yaw 자체보다 테이블 슬롯 방향이 중요하다.
-        # 이 위치를 유지한 채 8 -> 3 -> 1.75도로 회전하면 상부가 먼저
-        # 닿은 후 하부 훅이 걸린다는 CAD clearance 검증을 그대로 따른다.
-        gripper_origin = (
-            bowl_position
-            - self.bowl_frame @ self.BOWL_FROM_GRIPPER_ZERO
+        # 가까운 림과 위쪽 두꺼운 고리의 CAD 접촉점을 일치시킨다. 먼저
+        # 70도로 세워 수직 하강하고, 안착 후에는 이 world 접점을 고정한
+        # 채 1.75도까지 회전해 아래쪽 훅을 건다.
+        upper_pivot_world = (
+            bowl_position + self.bowl_frame @ self.BOWL_NEAR_RIM_LOCAL
         )
-        away_from_bowl = -self.bowl_frame[:, 0]
-        preinsert_origin = (
-            gripper_origin + away_from_bowl * self.APPROACH_DISTANCE
+        vertical_R = self._gripper_rotation(self.VERTICAL_ENTRY_DEG)
+        lock_R = self._gripper_rotation(self.LOCK_DEG)
+        upper_contact_origin = (
+            upper_pivot_world
+            - vertical_R @ self.UPPER_HOOK_CONTACT_LOCAL
         )
-        staging_origin = preinsert_origin + np.array(
-            [0.0, 0.0, self.STAGING_HEIGHT]
+        locked_origin = (
+            upper_pivot_world - lock_R @ self.UPPER_HOOK_CONTACT_LOCAL
         )
-        test_lifted_origin = gripper_origin + np.array(
+        locked_bowl_in_gripper = lock_R.T @ (bowl_position - locked_origin)
+        locked_geometry_error = np.linalg.norm(
+            locked_bowl_in_gripper - self.BOWL_FROM_GRIPPER_LOCKED
+        )
+        if locked_geometry_error > 0.0002:
+            raise RuntimeError(
+                "상부 접점 피벗의 최종 잠금 자세가 CAD 기준과 일치하지 않습니다: "
+                f"{locked_geometry_error * 1000:.2f} mm"
+            )
+        staging_origin = upper_contact_origin + np.array(
+            [0.0, 0.0, self.VERTICAL_STAGING_CLEARANCE]
+        )
+        precontact_origin = upper_contact_origin + np.array(
+            [0.0, 0.0, self.UPPER_PRECONTACT_CLEARANCE]
+        )
+        test_lifted_origin = locked_origin + np.array(
             [0.0, 0.0, self.TEST_LIFT_HEIGHT]
         )
-        lifted_origin = gripper_origin + np.array([0.0, 0.0, self.LIFT_HEIGHT])
+        lifted_origin = locked_origin + np.array([0.0, 0.0, self.LIFT_HEIGHT])
 
-        prelock_R = self._gripper_rotation(self.PRELOCK_DEG)
-        upper_contact_R = self._gripper_rotation(self.UPPER_CONTACT_DEG)
-        lock_R = self._gripper_rotation(self.LOCK_DEG)
         pour_R = self._gripper_rotation(self.LOCK_DEG + self.POUR_DEG)
 
         def stage(
@@ -250,6 +277,9 @@ class StirfryAutoSequence:
             gripper_orientation,
             joint_target=None,
             checkpoint="",
+            pivot_world=None,
+            pivot_start_deg=None,
+            pivot_end_deg=None,
         ):
             link_position, link_orientation = self._link6_pose(
                 gripper_position, gripper_orientation
@@ -261,10 +291,13 @@ class StirfryAutoSequence:
                 link_orientation.astype(np.float64),
                 joint_target=joint_target,
                 checkpoint=checkpoint,
+                pivot_world=pivot_world,
+                pivot_start_deg=pivot_start_deg,
+                pivot_end_deg=pivot_end_deg,
             )
 
         staging_position, staging_orientation = self._link6_pose(
-            staging_origin, prelock_R
+            staging_origin, vertical_R
         )
         staging_q, _, staging_error = self.arm.solve_ik(
             staging_position,
@@ -278,21 +311,43 @@ class StirfryAutoSequence:
 
         return [
             stage(
-                "슬롯 위 안전 위치(elbow-up)",
+                "그릇 위 수직 파지 대기(elbow-up)",
                 4.0,
                 staging_origin,
-                prelock_R,
+                vertical_R,
                 joint_target=staging_q,
             ),
-            stage("슬롯 입구로 하강", 3.0, preinsert_origin, prelock_R),
-            stage("그릇 쪽으로 수평 진입", 2.5, gripper_origin, prelock_R),
-            stage("두꺼운 상부를 그릇 위에 접촉", 2.0, gripper_origin, upper_contact_R),
-            stage("상부 접촉 안정화", 1.0, gripper_origin, upper_contact_R),
-            stage("손목 회전으로 하부 훅 잠금", 2.0, gripper_origin, lock_R),
+            stage(
+                "두꺼운 상부 고리 위로 수직 하강",
+                3.0,
+                precontact_origin,
+                vertical_R,
+            ),
+            stage(
+                "두꺼운 상부 고리에 그릇 림 안착",
+                2.0,
+                upper_contact_origin,
+                vertical_R,
+            ),
+            stage(
+                "상부 고리 안착 안정화",
+                1.5,
+                upper_contact_origin,
+                vertical_R,
+            ),
+            stage(
+                "상부 접점을 유지하며 하부 훅 회전 잠금",
+                6.0,
+                locked_origin,
+                lock_R,
+                pivot_world=upper_pivot_world,
+                pivot_start_deg=self.VERTICAL_ENTRY_DEG,
+                pivot_end_deg=self.LOCK_DEG,
+            ),
             stage(
                 "위·아래 걸림 검사 및 안정화",
                 3.0,
-                gripper_origin,
+                locked_origin,
                 lock_R,
                 checkpoint="lock_inspection",
             ),
@@ -323,6 +378,17 @@ class StirfryAutoSequence:
             @ Rotation.from_euler("y", wrist_deg, degrees=True).as_matrix()
         )
 
+    def _pivot_link6_pose(self, stage, alpha):
+        wrist_deg = self._lerp(
+            stage.pivot_start_deg, stage.pivot_end_deg, alpha
+        )
+        gripper_rotation = self._gripper_rotation(wrist_deg)
+        gripper_position = (
+            stage.pivot_world
+            - gripper_rotation @ self.UPPER_HOOK_CONTACT_LOCAL
+        )
+        return self._link6_pose(gripper_position, gripper_rotation)
+
     def _link6_pose(self, gripper_position_world, gripper_rotation_world):
         # T_world_gripper = T_world_link6 * T_link6_gripper
         link_rotation = (
@@ -341,22 +407,33 @@ class StirfryAutoSequence:
         seed = self.stages[0].joint_target.copy()
         print("=== 자동 파지 웨이포인트 IK 검사 ===")
         for index, stage in enumerate(self.stages):
-            if index == 0:
-                q = stage.joint_target
-                _, reached, error_mm = self.arm.solve_ik(
-                    stage.position, target_R=stage.orientation, seed_6=q
-                )
-                del reached
+            if stage.pivot_world is not None:
+                goals = [
+                    self._pivot_link6_pose(stage, alpha)
+                    for alpha in np.linspace(0.0, 1.0, 8)
+                ]
             else:
-                q, _, error_mm = self.arm.solve_ik(
-                    stage.position, target_R=stage.orientation, seed_6=seed
-                )
-            if not np.all(np.isfinite(q)) or error_mm > 8.0:
-                raise RuntimeError(
-                    f"자동 단계 '{stage.name}' IK 실패: 위치 오차 {error_mm:.2f} mm"
-                )
-            seed = q
-            print(f"  {stage.name}: 오차 {error_mm:.2f} mm")
+                goals = [(stage.position, stage.orientation)]
+
+            max_error_mm = 0.0
+            for goal_index, (position, orientation) in enumerate(goals):
+                if index == 0 and goal_index == 0:
+                    q = stage.joint_target
+                    _, _, error_mm = self.arm.solve_ik(
+                        position, target_R=orientation, seed_6=q
+                    )
+                else:
+                    q, _, error_mm = self.arm.solve_ik(
+                        position, target_R=orientation, seed_6=seed
+                    )
+                if not np.all(np.isfinite(q)) or error_mm > 8.0:
+                    raise RuntimeError(
+                        f"자동 단계 '{stage.name}' IK 실패: "
+                        f"위치 오차 {error_mm:.2f} mm"
+                    )
+                seed = q
+                max_error_mm = max(max_error_mm, error_mm)
+            print(f"  {stage.name}: 최대 오차 {max_error_mm:.2f} mm")
 
     def _enter_stage(self, index):
         self.stage_index = index
@@ -447,7 +524,11 @@ class StirfryAutoSequence:
             )
             print(
                 "  중력보상 목표각 보정 = "
-                f"{np.round(np.rad2deg(self.auto_control.last_position_bias), 2)} deg"
+                f"{np.round(np.rad2deg(self.auto_control.last_gravity_bias), 2)} deg"
+            )
+            print(
+                "  정착 목표각 보정 = "
+                f"{np.round(np.rad2deg(self.auto_control.last_settle_trim), 2)} deg"
             )
             print(
                 "  위치 드라이브 명령각 = "
