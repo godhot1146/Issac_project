@@ -8,11 +8,13 @@ run_stirfry.py — 두산 A0509 볶음 공정 씬 + 키보드 다중모드 제�
   ┌─────────────── 키 맵 ───────────────┐
   │ [모드]  1: JSC(관절)  2: TSC(좌표+IK)  3: OSC(좌표+동역학)
   │ [좌표이동 · TSC/OSC]  W/S: X±   A/D: Y±   Q/E: Z±
+  │ [자세회전 · TSC]      T/G: pitch±  F/H: roll±  C/V: yaw±
   │ [관절이동 · JSC]      J/L: 관절 선택   U/O: 선택관절 각도±
-  │ [공통]  R: 홈 자세    (뷰어 창 닫기: 종료)
+  │ [공통]  R: 홈(전 관절 0, 천장 방향)   (뷰어 창 닫기: 종료)
   └──────────────────────────────────────┘
 
-제어 로직은 controllers/doosan_controller.py (JSC/TSC/OSC 통합).
+제어 로직은 controllers/doosan_controller.py와
+controllers/doosan_arm_keyboard_teleop.py에 분리되어 있다.
 좌표 목표는 '로봇 베이스 기준'. OSC는 월드 텐서를 쓰므로 장착높이(+0.81) 보정해 넘긴다.
 
 실행:  conda activate issac_env  &&  python run_stirfry.py
@@ -30,9 +32,6 @@ from asset_config import get_asset_root
 asset_root = get_asset_root()   # 컴퓨터마다 에셋 위치 자동 탐색/저장 (asset_config.py 참고)
 
 BASE_Z     = 0.81     # A0509_Stand.step의 장착 상판 높이
-CART_STEP  = 0.01     # 좌표 목표 이동 스텝(m)
-JOINT_STEP = 0.05     # 관절 이동 스텝(rad)
-HOME_Q     = np.array([0.0, 0.0, 1.2, 0.0, 1.0, 0.0], dtype=np.float32)
 
 # 볶음 도면 배치. 새 stand(0.6 x 0.9 m)와 각 설비 사이에 최소
 # 0.15 m의 여유를 두면서, 모든 그릇 중심을 베이스에서 0.83 m 안에 둔다.
@@ -45,7 +44,6 @@ TABLE_TOP_Z        = 0.85
 # 이전 5~8.5 mm 낙하 간격을 줄여 초기 접촉 충격은 낮추되, 겹친 채 생성하지 않는다.
 COOK_BOWL_Z        = 0.8225
 INGREDIENT_BOWL_Z  = 0.8255
-TABLE_ASSET_VERSION = "v2"
 A0509_STAND_URDF    = "urdf/a0509_stand/a0509_stand.urdf"
 COMPLETE_TABLE_URDF = "urdf/complete_table/complete_table.urdf"
 PREPARE_TABLE_URDF  = "urdf/prepare_table/prepare_table.urdf"
@@ -263,18 +261,16 @@ gym.viewer_camera_look_at(
     gymapi.Vec3(0.0, 0.25, 0.80),
 )
 
-# 키보드 텔레오프 (JSC/TSC/OSC, 꾹 누르면 연속, TSC 자세 유지) — controllers/keyboard_teleop.py
+# 키보드 텔레오프 (JSC/TSC/OSC, 꾹 누르면 연속, TSC 자세 유지)
+# 구현: controllers/doosan_arm_keyboard_teleop.py
 from doosan_arm_keyboard_teleop import DoosanArmKeyboardTeleop
 teleop = DoosanArmKeyboardTeleop(gym, viewer, arm, base_z=BASE_Z)
 
-step = 0
 while not gym.query_viewer_has_closed(viewer):
     teleop.handle_and_apply()   # 이벤트 처리 + 연속동작 + 모드별 제어
 
     gym.simulate(sim); gym.fetch_results(sim, True)
     gym.step_graphics(sim); gym.draw_viewer(viewer, sim, True); gym.sync_frame_time(sim)
-
-    step += 1
 
 gym.destroy_viewer(viewer)
 gym.destroy_sim(sim)
