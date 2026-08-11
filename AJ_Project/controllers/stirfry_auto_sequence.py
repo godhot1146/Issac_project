@@ -64,9 +64,10 @@ class StirfryAutoSequence:
     UPPER_INSERT_CLEARANCE = 0.010
     UPPER_CENTER_DESCENT = 0.007326201
     UPPER_CONTACT_MAX_DESCENT = 0.050
-    LOWER_SEAT_CYCLES = 3
-    LOWER_SEAT_ROTATION_DEG = 1.5
-    LOWER_SEAT_DESCENT = 0.004
+    DIAGONAL_SEAT_CYCLES = 3
+    DIAGONAL_CENTER_ADVANCE = 0.005
+    DIAGONAL_DESCENT = 0.010
+    FINAL_LOCK_ROTATION_DEG = 2.5
     MICRO_TEST_LIFT_HEIGHT = 0.010
     TEST_LIFT_HEIGHT = 0.04
     INTERMEDIATE_LIFT_HEIGHT = 0.15
@@ -262,8 +263,12 @@ class StirfryAutoSequence:
                 f"[자동][도착 대기 {report_second:02d}s] {stage.name}: "
                 f"위치 {position_error * 1000:.1f} mm, 자세 {orientation_error:.2f} deg"
             )
+        contact_seating_checkpoints = {
+            "diagonal_seat",
+            "final_lock_rotation",
+        }
         if (
-            stage.checkpoint in {"lower_seat_rotation", "lower_seat_descent"}
+            stage.checkpoint in contact_seating_checkpoints
             and self.arrival_wait >= 0.8
         ):
             print(
@@ -272,6 +277,9 @@ class StirfryAutoSequence:
                 f"자세 오차 {orientation_error:.2f} deg. "
                 "실제 정지 자세를 접촉 위치로 사용합니다."
             )
+            if stage.checkpoint == "diagonal_seat":
+                self._retarget_final_lock_from_current()
+                return
             self._rebase_future_from_actual_stage(stage)
             self._finish_stage(stage)
             return
@@ -508,66 +516,77 @@ class StirfryAutoSequence:
             ),
         ]
 
-        # 큰 잠금 회전만으로는 하부 훅이 그릇 밑면에 얕게 걸릴 수 있다.
-        # 잠금 자세에서 1.5도 회전과 4 mm 하강을 세 번 번갈아 수행해
-        # 상부 림 접점을 유지하면서 하부 훅을 단계적으로 더 깊게 안착시킨다.
-        seat_pivot_world = upper_seat_pivot_world.copy()
-        seat_start_deg = self.LOCK_DEG
+        # 큰 잠금 회전이 림 옆면에서 멈추면 회전을 더 반복하지 않는다.
+        # 손목 자세를 고정하고 그리퍼 전체를 그릇 중심 방향 5 mm, 아래
+        # 10 mm의 대각선으로 최대 세 번 이동해 상부 고리 안쪽으로 림을
+        # 밀어 넣는다. 이동 저항이 감지되면 남은 이동을 건너뛰고 그 실제
+        # 접촉점에서 마지막 2.5도 잠금 회전만 수행한다.
+        diagonal_step = (
+            self.bowl_frame[:, 0] * self.DIAGONAL_CENTER_ADVANCE
+            - self.bowl_frame[:, 2] * self.DIAGONAL_DESCENT
+        )
         seated_origin = locked_origin.copy()
         seated_R = lock_R.copy()
-        for cycle in range(1, self.LOWER_SEAT_CYCLES + 1):
-            seat_end_deg = self.LOCK_DEG - cycle * self.LOWER_SEAT_ROTATION_DEG
-            seated_R = self._gripper_rotation(seat_end_deg)
-            rotated_origin = (
-                seat_pivot_world - seated_R @ self.UPPER_HOOK_SEAT_LOCAL
-            )
+        for cycle in range(1, self.DIAGONAL_SEAT_CYCLES + 1):
+            seated_origin = seated_origin + diagonal_step
             stages.append(
                 stage(
-                    f"하부 훅 안착 {cycle}/{self.LOWER_SEAT_CYCLES}: "
-                    f"안쪽으로 {self.LOWER_SEAT_ROTATION_DEG:.1f}도 회전",
-                    1.5,
-                    rotated_origin,
-                    seated_R,
-                    pivot_world=seat_pivot_world,
-                    pivot_local=self.UPPER_HOOK_SEAT_LOCAL,
-                    pivot_start_deg=seat_start_deg,
-                    pivot_end_deg=seat_end_deg,
-                    checkpoint="lower_seat_rotation",
-                    position_tolerance=0.002,
-                    orientation_tolerance_deg=0.5,
-                )
-            )
-            seated_origin = (
-                rotated_origin
-                - self.bowl_frame[:, 2] * self.LOWER_SEAT_DESCENT
-            )
-            stages.append(
-                stage(
-                    f"하부 훅 안착 {cycle}/{self.LOWER_SEAT_CYCLES}: "
-                    f"수직 {self.LOWER_SEAT_DESCENT * 1000:.0f}mm 하강",
-                    1.5,
+                    f"대각선 안착 {cycle}/{self.DIAGONAL_SEAT_CYCLES}: "
+                    f"중심 {self.DIAGONAL_CENTER_ADVANCE * 1000:.0f}mm + "
+                    f"하강 {self.DIAGONAL_DESCENT * 1000:.0f}mm",
+                    2.0,
                     seated_origin,
                     seated_R,
-                    checkpoint="lower_seat_descent",
+                    checkpoint="diagonal_seat",
                     position_tolerance=0.002,
                     orientation_tolerance_deg=0.5,
                 )
             )
             stages.append(
                 stage(
-                    f"하부 훅 안착 {cycle}/{self.LOWER_SEAT_CYCLES}: 안정화",
-                    0.8,
+                    f"대각선 안착 {cycle}/{self.DIAGONAL_SEAT_CYCLES}: 안정화",
+                    0.7,
                     seated_origin,
                     seated_R,
                     position_tolerance=0.002,
                     orientation_tolerance_deg=0.5,
                 )
             )
-            seat_pivot_world = (
-                seat_pivot_world
-                - self.bowl_frame[:, 2] * self.LOWER_SEAT_DESCENT
+
+        final_lock_pivot_world = (
+            seated_origin + seated_R @ self.UPPER_HOOK_SEAT_LOCAL
+        )
+        seated_lock_deg = self.LOCK_DEG - self.FINAL_LOCK_ROTATION_DEG
+        seated_R = self._gripper_rotation(seated_lock_deg)
+        seated_origin = (
+            final_lock_pivot_world
+            - seated_R @ self.UPPER_HOOK_SEAT_LOCAL
+        )
+        stages.append(
+            stage(
+                f"대각선 접촉점에서 안쪽으로 {self.FINAL_LOCK_ROTATION_DEG:.1f}도 최종 잠금",
+                2.0,
+                seated_origin,
+                seated_R,
+                pivot_world=final_lock_pivot_world,
+                pivot_local=self.UPPER_HOOK_SEAT_LOCAL,
+                pivot_start_deg=self.LOCK_DEG,
+                pivot_end_deg=seated_lock_deg,
+                checkpoint="final_lock_rotation",
+                position_tolerance=0.002,
+                orientation_tolerance_deg=0.5,
             )
-            seat_start_deg = seat_end_deg
+        )
+        stages.append(
+            stage(
+                "최종 하부 훅 잠금 안정화",
+                1.0,
+                seated_origin,
+                seated_R,
+                position_tolerance=0.002,
+                orientation_tolerance_deg=0.5,
+            )
+        )
 
         micro_lifted_origin = seated_origin + np.array(
             [0.0, 0.0, self.MICRO_TEST_LIFT_HEIGHT]
@@ -580,10 +599,6 @@ class StirfryAutoSequence:
         )
         lifted_origin = seated_origin + np.array(
             [0.0, 0.0, self.LIFT_HEIGHT]
-        )
-        seated_lock_deg = (
-            self.LOCK_DEG
-            - self.LOWER_SEAT_CYCLES * self.LOWER_SEAT_ROTATION_DEG
         )
         self.expected_seated_bowl_in_gripper = seated_R.T @ (
             bowl_position - seated_origin
@@ -853,8 +868,67 @@ class StirfryAutoSequence:
             "[자동][하부 훅 접촉] 실제 접촉 자세를 기준으로 재정렬합니다: "
             f"위치 보정 {translation_mm:.1f} mm, "
             f"자세 보정 {orientation_delta_deg:.2f} deg. "
-            f"이 자세에서 {self.LOWER_SEAT_CYCLES}회의 미세 회전·하강 안착을 시작합니다."
+            f"손목을 고정하고 최대 {self.DIAGONAL_SEAT_CYCLES}회의 "
+            "중심·하강 대각선 안착을 시작합니다."
         )
+
+    def _retarget_final_lock_from_current(self):
+        """대각선 접촉점에서 남은 이동을 건너뛰고 최종 잠금을 만든다."""
+        final_index = next(
+            index
+            for index in range(self.stage_index + 1, len(self.stages))
+            if self.stages[index].checkpoint == "final_lock_rotation"
+        )
+        original_final = self.stages[final_index]
+        gripper_position, gripper_orientation = self._rigid_body_pose(
+            self.arm.actor, self.gripper_body_index
+        )
+        actual_wrist_deg = self._wrist_deg(gripper_orientation)
+        target_wrist_deg = actual_wrist_deg - self.FINAL_LOCK_ROTATION_DEG
+        pivot_world = (
+            gripper_position
+            + gripper_orientation @ self.UPPER_HOOK_SEAT_LOCAL
+        )
+        target_gripper_orientation = self._gripper_rotation(target_wrist_deg)
+        target_gripper_position = (
+            pivot_world
+            - target_gripper_orientation @ self.UPPER_HOOK_SEAT_LOCAL
+        )
+        target_position, target_orientation = self._link6_pose(
+            target_gripper_position, target_gripper_orientation
+        )
+
+        translation = target_position - original_final.position
+        rotation_delta = target_orientation @ original_final.orientation.T
+        self.stages[final_index] = replace(
+            original_final,
+            position=target_position.astype(np.float32),
+            orientation=target_orientation.astype(np.float64),
+            pivot_world=pivot_world,
+            pivot_start_deg=actual_wrist_deg,
+            pivot_end_deg=target_wrist_deg,
+        )
+        for index in range(final_index + 1, len(self.stages)):
+            original = self.stages[index]
+            self.stages[index] = replace(
+                original,
+                position=(original.position + translation).astype(np.float32),
+                orientation=(rotation_delta @ original.orientation).astype(
+                    np.float64
+                ),
+            )
+
+        bowl_position = self._bowl_position()
+        self.expected_seated_bowl_in_gripper = (
+            target_gripper_orientation.T
+            @ (bowl_position - target_gripper_position)
+        )
+        print(
+            "[자동][대각선 접촉] 남은 대각선 이동을 생략하고 "
+            f"현재 접촉점에서 {self.FINAL_LOCK_ROTATION_DEG:.1f}도 "
+            "최종 잠금으로 전환합니다."
+        )
+        self._enter_stage(final_index)
 
     def _rebase_future_from_actual_stage(self, stage):
         """접촉으로 목표에 못 간 경우 이후 경로를 실제 정지 자세에 맞춘다."""
