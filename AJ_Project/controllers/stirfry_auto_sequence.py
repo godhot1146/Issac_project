@@ -41,26 +41,26 @@ class StirfryAutoSequence:
 
     # stirfry_gripper.step / stirfry_bowl.step의 깊은 고리 잠금 자세 CAD 값(m).
     # 빨간 원으로 확인한 안쪽 천장 접점을 유지한 채 아래 훅이 그릇 바닥에
-    # 닿기 직전인 -6.54도 자세에서의 bowl origin (gripper frame)이다.
+    # 닿기 직전인 -6.10도 자세에서의 bowl origin (gripper frame)이다.
     BOWL_FROM_GRIPPER_LOCKED = np.array(
-        [0.244150678, 0.0, -0.048588184], dtype=np.float64
+        [0.247538228, 0.0, -0.048795155], dtype=np.float64
     )
 
-    # 림보다 10 mm 위에서 잠금 반대 방향으로 88도까지 열어 입구 접촉을
-    # 피한다. 그 높이를 유지한 채 그릇 중심 방향으로 36 mm 삽입한 다음
-    # 총 16 mm 하강한다(진입 여유 10 mm + 안착 6 mm). 그러면 입구 면이
-    # 아니라 STEP face 15(빨간 원의 깊은 안쪽 천장)와 림 윗면이 약
-    # 0.48 mm 간격으로 마주한다. 그 접점을 유지해 -6.54도까지 회전하면
-    # 아래 훅 간격은 약 0.013 mm다.
+    # 림보다 10 mm 위에서 잠금 반대 방향으로 75도까지만 살짝 열어 입구
+    # 접촉을 피한다. 그 높이를 유지한 채 그릇 중심 방향으로 14 mm 삽입한
+    # 다음 총 22 mm 하강한다(진입 여유 10 mm + 안착 12 mm). 그러면 입구
+    # 면이 아니라 STEP face 15(빨간 원의 깊은 안쪽 천장)와 림 윗면이
+    # 맞닿는다. 그 접점을 유지해 -6.10도까지 회전하면 아래 훅 간격은
+    # 약 0.006 mm다.
     VERTICAL_ENTRY_DEG = 70.0
-    UPPER_OPEN_DEG = 88.0
-    LOCK_DEG = -6.54
+    UPPER_OPEN_DEG = 75.0
+    LOCK_DEG = -6.10
 
     VERTICAL_STAGING_CLEARANCE = 0.18
     UPPER_PRECONTACT_CLEARANCE = 0.04
     UPPER_INSERT_CLEARANCE = 0.010
-    UPPER_INSERT_DISTANCE = 0.036
-    UPPER_SEAT_DESCENT = 0.016
+    UPPER_INSERT_DISTANCE = 0.014
+    UPPER_SEAT_DESCENT = 0.022
     TEST_LIFT_HEIGHT = 0.04
     LIFT_HEIGHT = 0.45
     POUR_DEG = 50.0
@@ -89,7 +89,7 @@ class StirfryAutoSequence:
         [0.1545, 0.0, 0.0355], dtype=np.float64
     )
     UPPER_HOOK_SEAT_LOCAL = np.array(
-        [0.128614516, 0.0, 0.045266161], dtype=np.float64
+        [0.136960477, 0.0, 0.043477741], dtype=np.float64
     )
     BOWL_NEAR_RIM_LOCAL = np.array([-0.125, 0.0, 0.080], dtype=np.float64)
 
@@ -247,10 +247,10 @@ class StirfryAutoSequence:
         self._enter_stage(0)
 
     def _build_stages(self, bowl_position):
-        # 림보다 10 mm 위에서 88도로 고리 입구를 크게 연다. 이 여유 높이를
-        # 유지한 채 36 mm 중심 방향으로 통과시킨 뒤 총 16 mm 하강해 림을
+        # 림보다 10 mm 위에서 75도로 고리 입구를 살짝 연다. 이 여유 높이를
+        # 유지한 채 14 mm 중심 방향으로 통과시킨 뒤 총 22 mm 하강해 림을
         # 빨간 원의 깊은 안쪽 천장(face 15)까지 보낸다. 이후 이 접촉축을
-        # 고정한 원호로 -6.54도까지 회전하면 아래 훅도 그릇 바닥에 닿는다.
+        # 고정한 원호로 -6.10도까지 회전하면 아래 훅도 그릇 바닥에 닿는다.
         outer_rim_world = (
             bowl_position + self.bowl_frame @ self.BOWL_NEAR_RIM_LOCAL
         )
@@ -370,13 +370,13 @@ class StirfryAutoSequence:
                 open_R,
             ),
             stage(
-                "림 위 10mm 여유를 유지하며 중심으로 36mm 삽입",
+                "림 위 10mm 여유를 유지하며 중심으로 14mm 삽입",
                 4.0,
                 inserted_origin,
                 open_R,
             ),
             stage(
-                "림 윗면을 깊은 고리 안쪽 천장으로 16mm 하강",
+                "림 윗면을 깊은 고리 안쪽 천장으로 22mm 하강",
                 4.0,
                 seated_origin,
                 open_R,
