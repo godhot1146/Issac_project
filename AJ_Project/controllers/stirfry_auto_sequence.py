@@ -39,25 +39,26 @@ class StirfryAutoSequence:
 
     HOME_Q = np.zeros(6, dtype=np.float32)
 
-    # stirfry_gripper.step / stirfry_bowl.step의 새 잠금 자세 CAD 검증값(m).
-    # 윗고리 안쪽 천장 접점을 유지한 채 아래 훅이 그릇 바닥에 닿기 직전인
-    # 8.06도 자세에서의 bowl origin (gripper frame)이다.
+    # stirfry_gripper.step / stirfry_bowl.step의 깊은 고리 잠금 자세 CAD 값(m).
+    # 빨간 원으로 확인한 안쪽 천장 접점을 유지한 채 아래 훅이 그릇 바닥에
+    # 닿기 직전인 -6.54도 자세에서의 bowl origin (gripper frame)이다.
     BOWL_FROM_GRIPPER_LOCKED = np.array(
-        [0.278331035, 0.0, -0.031632119], dtype=np.float64
+        [0.244150678, 0.0, -0.048588184], dtype=np.float64
     )
 
-    # 70도에서 림 높이까지 접근하고 잠금 반대 방향으로 0.25도 열어 입구
-    # 여유를 만든다. 림을 13 mm 안쪽으로 통과시킨 뒤 2.4 mm 하강하면
-    # 고리 안쪽 천장과 림 윗면이 약 0.061 mm 간격으로 마주한다. 이 접점을
-    # 유지해 8.06도까지 회전하면 아래 훅 간격도 약 0.029 mm가 된다.
+    # 70도에서 림 높이까지 접근한 뒤 잠금 반대 방향으로 88도까지 열어
+    # 깊은 고리의 진입 여유를 만든다. 림을 그릇 중심 방향으로 36 mm
+    # 삽입하고 6 mm 하강하면, 입구 면이 아니라 STEP face 15(빨간 원의
+    # 깊은 안쪽 천장)와 림 윗면이 약 0.48 mm 간격으로 마주한다. 그
+    # 접점을 유지해 -6.54도까지 회전하면 아래 훅 간격은 약 0.013 mm다.
     VERTICAL_ENTRY_DEG = 70.0
-    UPPER_OPEN_DEG = 70.25
-    LOCK_DEG = 8.06
+    UPPER_OPEN_DEG = 88.0
+    LOCK_DEG = -6.54
 
     VERTICAL_STAGING_CLEARANCE = 0.18
     UPPER_PRECONTACT_CLEARANCE = 0.04
-    UPPER_INSERT_DISTANCE = 0.013
-    UPPER_SEAT_DESCENT = 0.0024
+    UPPER_INSERT_DISTANCE = 0.036
+    UPPER_SEAT_DESCENT = 0.006
     TEST_LIFT_HEIGHT = 0.04
     LIFT_HEIGHT = 0.45
     POUR_DEG = 50.0
@@ -79,14 +80,14 @@ class StirfryAutoSequence:
     LINK6_TO_GRIPPER_POSITION = np.array([0.0, 0.0, 0.016], dtype=np.float64)
     LINK6_TO_GRIPPER_ROTATION = Rotation.from_euler("x", 90.0, degrees=True).as_matrix()
 
-    # CAD 좌표(m): 최초 림 정렬 기준과 실제 고리 안쪽 천장 피벗축.
-    # 두 번째 값은 STEP의 안쪽 천장 face와 bowl rim top face만 분리해
-    # 전체 3D 형상 관통이 없도록 계산한 접촉축이다.
+    # CAD 좌표(m): 최초 림 정렬 기준과 깊은 고리 안쪽 천장 피벗축.
+    # 두 번째 값은 입구 쪽 face들을 제외하고 STEP face 15와 bowl rim top
+    # face의 최근접점만으로 계산했다.
     UPPER_ENTRY_REFERENCE_LOCAL = np.array(
         [0.1545, 0.0, 0.0355], dtype=np.float64
     )
     UPPER_HOOK_SEAT_LOCAL = np.array(
-        [0.149915818, 0.0, 0.031000787], dtype=np.float64
+        [0.128614516, 0.0, 0.045266161], dtype=np.float64
     )
     BOWL_NEAR_RIM_LOCAL = np.array([-0.125, 0.0, 0.080], dtype=np.float64)
 
@@ -244,10 +245,10 @@ class StirfryAutoSequence:
         self._enter_stage(0)
 
     def _build_stages(self, bowl_position):
-        # 70도에서 바깥 림 높이를 맞춘 뒤 70.25도로 입구를 살짝 연다.
-        # 열린 고리를 13 mm 안쪽으로 통과시키고 2.4 mm 하강해 림 윗면을
-        # 고리 안쪽 천장에 안착한다. 이후 이 접촉축을 고정한 원호로
-        # 8.06도까지 회전하면 아래 훅도 관통 없이 그릇 바닥에 도달한다.
+        # 70도에서 바깥 림 높이를 맞춘 뒤 88도로 고리 입구를 크게 연다.
+        # 열린 고리를 36 mm 중심 방향으로 통과시키고 6 mm 하강해 림을
+        # 빨간 원의 깊은 안쪽 천장(face 15)까지 보낸다. 이후 이 접촉축을
+        # 고정한 원호로 -6.54도까지 회전하면 아래 훅도 그릇 바닥에 닿는다.
         outer_rim_world = (
             bowl_position + self.bowl_frame @ self.BOWL_NEAR_RIM_LOCAL
         )
@@ -359,31 +360,31 @@ class StirfryAutoSequence:
             ),
             stage(
                 "잠금 반대 회전으로 상부 고리 입구 열기",
-                1.5,
+                2.0,
                 open_origin,
                 open_R,
             ),
             stage(
-                "열린 상부 고리를 그릇 중심으로 13mm 삽입",
-                3.0,
+                "열린 상부 고리를 그릇 중심으로 36mm 깊게 삽입",
+                4.0,
                 inserted_origin,
                 open_R,
             ),
             stage(
-                "림 윗면을 고리 안쪽 천장으로 2.4mm 하강",
+                "림 윗면을 깊은 고리 안쪽 천장으로 6mm 하강",
+                3.0,
+                seated_origin,
+                open_R,
+            ),
+            stage(
+                "깊은 상부 고리 안쪽 림 안착 안정화",
                 2.0,
                 seated_origin,
                 open_R,
             ),
             stage(
-                "상부 고리 안쪽 림 안착 안정화",
-                1.5,
-                seated_origin,
-                open_R,
-            ),
-            stage(
-                "상부 천장 접점을 유지하며 하부 훅 회전 잠금",
-                7.0,
+                "깊은 상부 천장 접점을 유지하며 하부 훅 회전 잠금",
+                8.0,
                 locked_origin,
                 lock_R,
                 pivot_world=upper_seat_pivot_world,
