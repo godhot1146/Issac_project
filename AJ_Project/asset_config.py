@@ -2,10 +2,10 @@
 asset_config.py — 에셋 폴더(isaac_assets) 경로를 컴퓨터마다 알아서 찾아준다.
 
 우선순위:
-  1) 환경변수 ISAAC_ASSETS 가 있으면 그걸 사용
-  2) 이전에 저장해둔 로컬 설정 파일(config.local.json)  ← git에 커밋 안 함
-  3) 흔한 위치 자동 탐색 (레포 나란히 배치 / 홈·Desktop 등)
-  4) 그래도 못 찾으면 첫 실행 때 한 번만 물어보고 저장
+  1) 로컬 설정 파일(config.local.json)이 있으면 그 안의 경로를 사용  ← git에 커밋 안 함
+  2) 없으면 환경변수 ISAAC_ASSETS 확인
+       - 있으면 그 값을 config.local.json에 그대로 저장 후 사용
+       - 없으면 config.local.json을 빈 값으로 생성하고, 경로를 채워넣으라는 안내 메시지 출력
 
 런파일에서:
     from asset_config import get_asset_root
@@ -29,47 +29,33 @@ def _save(path):
     print(f"[asset_config] 에셋 경로 저장됨 → {CONFIG_PATH}")
 
 
-def _candidates():
-    """자동 탐색 후보들 (레포를 나란히 둔 경우 + 흔한 위치)."""
-    home = os.path.expanduser("~")
-    return [
-        # 레포를 나란히 둔 경우: .../Issac_project/AJ_Project → .../Issac_asset/isaac_assets
-        os.path.abspath(os.path.join(_HERE, "..", "..", "Issac_asset", "isaac_assets")),
-        os.path.join(home, "Desktop", "Issac_asset", "isaac_assets"),
-        os.path.join(home, "Issac_asset", "isaac_assets"),
-    ]
-
-
 def get_asset_root():
-    # 1) 환경변수 우선
-    env = os.environ.get("ISAAC_ASSETS")
-    if _is_valid(env):
-        return env
-
-    # 2) 저장된 로컬 설정
+    # 1) config.local.json 부터 확인
     if os.path.exists(CONFIG_PATH):
         try:
             saved = json.load(open(CONFIG_PATH)).get("asset_root")
-            if _is_valid(saved):
-                return saved
         except (ValueError, OSError):
-            pass  # 파일이 깨졌으면 무시하고 아래로
+            saved = None
 
-    # 3) 흔한 위치 자동 탐색 → 찾으면 저장
-    for cand in _candidates():
-        if _is_valid(cand):
-            _save(cand)
-            return cand
+        if _is_valid(saved):
+            return saved
 
-    # 4) 첫 실행: 한 번만 물어보고 저장
-    print("[asset_config] 에셋 폴더(isaac_assets)를 찾지 못했습니다.")
-    path = input("isaac_assets 폴더의 전체 경로를 입력하세요: ").strip()
-    if not _is_valid(path):
         raise FileNotFoundError(
-            f"유효한 에셋 폴더가 아닙니다(urdf 하위폴더가 없음): {path}"
+            f"{CONFIG_PATH} 의 asset_root 경로가 유효하지 않습니다: {saved!r}\n"
+            f"해당 파일을 열어 isaac_assets 폴더의 전체 경로를 입력한 뒤 다시 실행해주세요."
         )
-    _save(path)
-    return path
+
+    # 2) config.local.json이 없으면 환경변수 확인
+    env = os.environ.get("ISAAC_ASSETS")
+    if _is_valid(env):
+        _save(env)
+        return env
+
+    # 환경변수도 없으면 빈 설정 파일만 생성하고 안내
+    _save("")
+    print(f"[asset_config] {CONFIG_PATH} 파일을 생성했습니다.")
+    print("해당 파일의 'asset_root' 값에 isaac_assets 폴더의 전체 경로를 입력한 뒤 다시 실행해주세요.")
+    raise FileNotFoundError(f"{CONFIG_PATH} 에 asset_root 경로를 입력해주세요.")
 
 
 if __name__ == "__main__":
