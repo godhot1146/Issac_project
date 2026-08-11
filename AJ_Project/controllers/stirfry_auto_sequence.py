@@ -46,19 +46,21 @@ class StirfryAutoSequence:
         [0.244150678, 0.0, -0.048588184], dtype=np.float64
     )
 
-    # 70도에서 림 높이까지 접근한 뒤 잠금 반대 방향으로 88도까지 열어
-    # 깊은 고리의 진입 여유를 만든다. 림을 그릇 중심 방향으로 36 mm
-    # 삽입하고 6 mm 하강하면, 입구 면이 아니라 STEP face 15(빨간 원의
-    # 깊은 안쪽 천장)와 림 윗면이 약 0.48 mm 간격으로 마주한다. 그
-    # 접점을 유지해 -6.54도까지 회전하면 아래 훅 간격은 약 0.013 mm다.
+    # 림보다 10 mm 위에서 잠금 반대 방향으로 88도까지 열어 입구 접촉을
+    # 피한다. 그 높이를 유지한 채 그릇 중심 방향으로 36 mm 삽입한 다음
+    # 총 16 mm 하강한다(진입 여유 10 mm + 안착 6 mm). 그러면 입구 면이
+    # 아니라 STEP face 15(빨간 원의 깊은 안쪽 천장)와 림 윗면이 약
+    # 0.48 mm 간격으로 마주한다. 그 접점을 유지해 -6.54도까지 회전하면
+    # 아래 훅 간격은 약 0.013 mm다.
     VERTICAL_ENTRY_DEG = 70.0
     UPPER_OPEN_DEG = 88.0
     LOCK_DEG = -6.54
 
     VERTICAL_STAGING_CLEARANCE = 0.18
     UPPER_PRECONTACT_CLEARANCE = 0.04
+    UPPER_INSERT_CLEARANCE = 0.010
     UPPER_INSERT_DISTANCE = 0.036
-    UPPER_SEAT_DESCENT = 0.006
+    UPPER_SEAT_DESCENT = 0.016
     TEST_LIFT_HEIGHT = 0.04
     LIFT_HEIGHT = 0.45
     POUR_DEG = 50.0
@@ -245,8 +247,8 @@ class StirfryAutoSequence:
         self._enter_stage(0)
 
     def _build_stages(self, bowl_position):
-        # 70도에서 바깥 림 높이를 맞춘 뒤 88도로 고리 입구를 크게 연다.
-        # 열린 고리를 36 mm 중심 방향으로 통과시키고 6 mm 하강해 림을
+        # 림보다 10 mm 위에서 88도로 고리 입구를 크게 연다. 이 여유 높이를
+        # 유지한 채 36 mm 중심 방향으로 통과시킨 뒤 총 16 mm 하강해 림을
         # 빨간 원의 깊은 안쪽 천장(face 15)까지 보낸다. 이후 이 접촉축을
         # 고정한 원호로 -6.54도까지 회전하면 아래 훅도 그릇 바닥에 닿는다.
         outer_rim_world = (
@@ -259,7 +261,10 @@ class StirfryAutoSequence:
             outer_rim_world
             - entry_R @ self.UPPER_ENTRY_REFERENCE_LOCAL
         )
-        open_origin = entry_origin.copy()
+        open_origin = (
+            entry_origin
+            + self.bowl_frame[:, 2] * self.UPPER_INSERT_CLEARANCE
+        )
         inserted_origin = (
             open_origin
             + self.bowl_frame[:, 0] * self.UPPER_INSERT_DISTANCE
@@ -353,9 +358,9 @@ class StirfryAutoSequence:
                 entry_R,
             ),
             stage(
-                "두꺼운 상부 고리를 바깥 림 높이로 하강",
+                "두꺼운 상부 고리를 림보다 10mm 위로 하강",
                 2.0,
-                entry_origin,
+                open_origin,
                 entry_R,
             ),
             stage(
@@ -365,14 +370,14 @@ class StirfryAutoSequence:
                 open_R,
             ),
             stage(
-                "열린 상부 고리를 그릇 중심으로 36mm 깊게 삽입",
+                "림 위 10mm 여유를 유지하며 중심으로 36mm 삽입",
                 4.0,
                 inserted_origin,
                 open_R,
             ),
             stage(
-                "림 윗면을 깊은 고리 안쪽 천장으로 6mm 하강",
-                3.0,
+                "림 윗면을 깊은 고리 안쪽 천장으로 16mm 하강",
+                4.0,
                 seated_origin,
                 open_R,
             ),
