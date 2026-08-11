@@ -29,8 +29,10 @@ class _PoseStage:
     joint_target: object = None
     checkpoint: str = ""
     pivot_world: object = None
+    pivot_end_world: object = None
     pivot_start_deg: object = None
     pivot_end_deg: object = None
+    pivot_recenter_deg: object = None
 
 
 class StirfryAutoSequence:
@@ -43,13 +45,16 @@ class StirfryAutoSequence:
         [0.281884780, 0.0, -0.040645373], dtype=np.float64
     )
 
-    # 그리퍼를 세워 위쪽 두꺼운 고리에 림을 먼저 안착한 뒤, 그 접점을
-    # 고정한 원호를 따라 손목을 회전해 아래쪽 훅까지 건다.
+    # 그리퍼를 세워 위쪽 두꺼운 고리에 림을 먼저 안착한 뒤, 상부 체결을
+    # 유지하는 원호를 따라 손목을 회전해 아래쪽 훅까지 건다.
     VERTICAL_ENTRY_DEG = 70.0
+    PIVOT_RECENTER_DEG = 60.0
     LOCK_DEG = 1.75
 
     VERTICAL_STAGING_CLEARANCE = 0.18
     UPPER_PRECONTACT_CLEARANCE = 0.04
+    # bowl outer radius 125 mm - inner radius 119.499 mm.
+    UPPER_INSERT_DISTANCE = 0.005501
     TEST_LIFT_HEIGHT = 0.04
     LIFT_HEIGHT = 0.45
     POUR_DEG = 50.0
@@ -71,9 +76,9 @@ class StirfryAutoSequence:
     LINK6_TO_GRIPPER_POSITION = np.array([0.0, 0.0, 0.016], dtype=np.float64)
     LINK6_TO_GRIPPER_ROTATION = Rotation.from_euler("x", 90.0, degrees=True).as_matrix()
 
-    # CAD 좌표(m): 위쪽 두꺼운 고리의 원통 접촉 중심과 그릇의 가까운 림.
-    # 이 두 점을 일치시키면 70도부터 잠금각까지 회전하는 동안 형상 관통
-    # 없이 upper gap 0.75 mm를 유지하고 lower gap이 37.7 -> 0.78 mm가 된다.
+    # CAD 좌표(m): 위쪽 두꺼운 고리의 원통 접촉 중심과 그릇의 바깥 림.
+    # 70도에서 림 두께 5.501 mm만큼 안쪽으로 끼운 뒤 60도까지 회전하며
+    # 바깥 기준으로 복귀하면 형상 관통 없이 잠금각까지 이동할 수 있다.
     UPPER_HOOK_CONTACT_LOCAL = np.array(
         [0.1545, 0.0, 0.0355], dtype=np.float64
     )
@@ -233,20 +238,30 @@ class StirfryAutoSequence:
         self._enter_stage(0)
 
     def _build_stages(self, bowl_position):
-        # 가까운 림과 위쪽 두꺼운 고리의 CAD 접촉점을 일치시킨다. 먼저
-        # 70도로 세워 수직 하강하고, 안착 후에는 이 world 접점을 고정한
-        # 채 1.75도까지 회전해 아래쪽 훅을 건다.
-        upper_pivot_world = (
+        # 바깥 림 높이까지 수직 하강한 뒤, 그릇 중심 방향으로 실제 림
+        # 두께인 5.501 mm만큼 넣어 상부 고리 안에 림을 끼운다. 회전 초반
+        # 70 -> 60도 구간에서는 피벗을 다시 바깥 림으로 이동시키고, 이후
+        # 그 접점을 고정해 1.75도까지 아래쪽 훅을 잠근다.
+        outer_upper_pivot_world = (
             bowl_position + self.bowl_frame @ self.BOWL_NEAR_RIM_LOCAL
+        )
+        inner_upper_pivot_world = (
+            outer_upper_pivot_world
+            + self.bowl_frame[:, 0] * self.UPPER_INSERT_DISTANCE
         )
         vertical_R = self._gripper_rotation(self.VERTICAL_ENTRY_DEG)
         lock_R = self._gripper_rotation(self.LOCK_DEG)
-        upper_contact_origin = (
-            upper_pivot_world
+        outer_upper_contact_origin = (
+            outer_upper_pivot_world
+            - vertical_R @ self.UPPER_HOOK_CONTACT_LOCAL
+        )
+        inner_upper_contact_origin = (
+            inner_upper_pivot_world
             - vertical_R @ self.UPPER_HOOK_CONTACT_LOCAL
         )
         locked_origin = (
-            upper_pivot_world - lock_R @ self.UPPER_HOOK_CONTACT_LOCAL
+            outer_upper_pivot_world
+            - lock_R @ self.UPPER_HOOK_CONTACT_LOCAL
         )
         locked_bowl_in_gripper = lock_R.T @ (bowl_position - locked_origin)
         locked_geometry_error = np.linalg.norm(
@@ -257,10 +272,10 @@ class StirfryAutoSequence:
                 "상부 접점 피벗의 최종 잠금 자세가 CAD 기준과 일치하지 않습니다: "
                 f"{locked_geometry_error * 1000:.2f} mm"
             )
-        staging_origin = upper_contact_origin + np.array(
+        staging_origin = outer_upper_contact_origin + np.array(
             [0.0, 0.0, self.VERTICAL_STAGING_CLEARANCE]
         )
-        precontact_origin = upper_contact_origin + np.array(
+        precontact_origin = outer_upper_contact_origin + np.array(
             [0.0, 0.0, self.UPPER_PRECONTACT_CLEARANCE]
         )
         test_lifted_origin = locked_origin + np.array(
@@ -278,8 +293,10 @@ class StirfryAutoSequence:
             joint_target=None,
             checkpoint="",
             pivot_world=None,
+            pivot_end_world=None,
             pivot_start_deg=None,
             pivot_end_deg=None,
+            pivot_recenter_deg=None,
         ):
             link_position, link_orientation = self._link6_pose(
                 gripper_position, gripper_orientation
@@ -292,8 +309,10 @@ class StirfryAutoSequence:
                 joint_target=joint_target,
                 checkpoint=checkpoint,
                 pivot_world=pivot_world,
+                pivot_end_world=pivot_end_world,
                 pivot_start_deg=pivot_start_deg,
                 pivot_end_deg=pivot_end_deg,
+                pivot_recenter_deg=pivot_recenter_deg,
             )
 
         staging_position, staging_orientation = self._link6_pose(
@@ -324,25 +343,33 @@ class StirfryAutoSequence:
                 vertical_R,
             ),
             stage(
-                "두꺼운 상부 고리에 그릇 림 안착",
+                "두꺼운 상부 고리를 바깥 림 높이로 하강",
                 2.0,
-                upper_contact_origin,
+                outer_upper_contact_origin,
                 vertical_R,
             ),
             stage(
-                "상부 고리 안착 안정화",
+                "두꺼운 상부 고리를 그릇 안쪽으로 5.5mm 삽입",
+                2.0,
+                inner_upper_contact_origin,
+                vertical_R,
+            ),
+            stage(
+                "상부 고리에 그릇 림 안착 안정화",
                 1.5,
-                upper_contact_origin,
+                inner_upper_contact_origin,
                 vertical_R,
             ),
             stage(
-                "상부 접점을 유지하며 하부 훅 회전 잠금",
+                "상부 고리 체결을 유지하며 하부 훅 회전 잠금",
                 6.0,
                 locked_origin,
                 lock_R,
-                pivot_world=upper_pivot_world,
+                pivot_world=inner_upper_pivot_world,
+                pivot_end_world=outer_upper_pivot_world,
                 pivot_start_deg=self.VERTICAL_ENTRY_DEG,
                 pivot_end_deg=self.LOCK_DEG,
+                pivot_recenter_deg=self.PIVOT_RECENTER_DEG,
             ),
             stage(
                 "위·아래 걸림 검사 및 안정화",
@@ -382,9 +409,24 @@ class StirfryAutoSequence:
         wrist_deg = self._lerp(
             stage.pivot_start_deg, stage.pivot_end_deg, alpha
         )
+        pivot_world = stage.pivot_world
+        if stage.pivot_end_world is not None:
+            recenter_span = (
+                stage.pivot_start_deg - stage.pivot_recenter_deg
+            )
+            if recenter_span <= 0.0:
+                raise RuntimeError("피벗 복귀 각도 구간이 올바르지 않습니다.")
+            recenter_alpha = np.clip(
+                (stage.pivot_start_deg - wrist_deg) / recenter_span,
+                0.0,
+                1.0,
+            )
+            pivot_world = self._lerp(
+                stage.pivot_world, stage.pivot_end_world, recenter_alpha
+            )
         gripper_rotation = self._gripper_rotation(wrist_deg)
         gripper_position = (
-            stage.pivot_world
+            pivot_world
             - gripper_rotation @ self.UPPER_HOOK_CONTACT_LOCAL
         )
         return self._link6_pose(gripper_position, gripper_rotation)
@@ -410,7 +452,7 @@ class StirfryAutoSequence:
             if stage.pivot_world is not None:
                 goals = [
                     self._pivot_link6_pose(stage, alpha)
-                    for alpha in np.linspace(0.0, 1.0, 8)
+                    for alpha in np.linspace(0.0, 1.0, 16)
                 ]
             else:
                 goals = [(stage.position, stage.orientation)]
