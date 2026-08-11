@@ -11,7 +11,7 @@
 사용할 수 없다.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -32,6 +32,7 @@ class _PoseStage:
     pivot_local: object = None
     pivot_start_deg: object = None
     pivot_end_deg: object = None
+    contact_seek: bool = False
 
 
 class StirfryAutoSequence:
@@ -39,26 +40,28 @@ class StirfryAutoSequence:
 
     HOME_Q = np.zeros(6, dtype=np.float32)
 
-    # stirfry_gripper.step / stirfry_bowl.step의 중앙 진입 잠금 자세 CAD 값(m).
-    # 림을 27.47 mm 고리 입구의 중앙에 놓고 윗고리 접점을 유지한 채 아래
-    # 훅이 그릇 바닥에 닿기 직전인 -2.32도 자세에서의 bowl origin이다.
+    # 최대 접촉 탐색 하강점에서 계산한 잠금 자세의 bowl origin(m).
+    # 실제 실행에서는 천장 접촉을 감지한 위치만큼 뒤 웨이포인트를 재정렬한다.
     BOWL_FROM_GRIPPER_LOCKED = np.array(
-        [0.258574682, 0.0, -0.047634932], dtype=np.float64
+        [0.253382480, 0.0, -0.001173198], dtype=np.float64
     )
 
     # 림보다 10 mm 위에서 75도까지만 살짝 연다. 이후 월드 수평 거리만
     # 명령하지 않고, STEP 고리 입구의 아래 4.00 mm / 위 31.469 mm 사이
     # 중앙점(x=148.0, z=17.7345 mm)에 림 기준점을 직접 정렬한다. 이
-    # 중앙에서 7.326 mm 수직 하강하면 윗고리와 약 0.536 mm 간격이고,
-    # 접점을 유지해 -2.32도까지 회전하면 아래 훅 간격은 약 0.021 mm다.
+    # 중앙에서 먼저 7.326 mm 하강하고 3도 안쪽으로 되돌린다. 그다음 최대
+    # 50 mm를 천천히 추가 하강하되 추종 오차로 천장 접촉을 감지하면 즉시
+    # 멈추고, 실제 접촉 위치를 기준으로 잠금·상승 웨이포인트를 재정렬한다.
     VERTICAL_ENTRY_DEG = 70.0
     UPPER_OPEN_DEG = 75.0
+    UPPER_INWARD_DEG = 72.0
     LOCK_DEG = -2.32
 
     VERTICAL_STAGING_CLEARANCE = 0.18
     UPPER_PRECONTACT_CLEARANCE = 0.04
     UPPER_INSERT_CLEARANCE = 0.010
     UPPER_CENTER_DESCENT = 0.007326201
+    UPPER_CONTACT_MAX_DESCENT = 0.050
     TEST_LIFT_HEIGHT = 0.04
     LIFT_HEIGHT = 0.45
     POUR_DEG = 50.0
@@ -73,6 +76,9 @@ class StirfryAutoSequence:
     POSITION_TOLERANCE = 0.005
     ORIENTATION_TOLERANCE_DEG = 1.0
     ARRIVAL_TIMEOUT_S = 10.0
+    CONTACT_DETECT_ERROR = 0.006
+    CONTACT_DETECT_HOLD_S = 0.6
+    CONTACT_DETECT_ORIENTATION_DEG = 3.0
     TEST_LIFT_MIN_RISE = 0.015
     FULL_LIFT_MIN_RISE = 0.30
 
@@ -140,6 +146,10 @@ class StirfryAutoSequence:
         self.finished = False
         self.failed = False
         self.initial_bowl_z = None
+        self.command_position = None
+        self.command_orientation = None
+        self.contact_stall_time = 0.0
+        self.upper_contact_detected = False
 
         self.arm.go_joints(self.HOME_Q)
         self.auto_control = StirfryAutoJointControl(self.arm, dt=self.dt)
@@ -164,6 +174,29 @@ class StirfryAutoSequence:
         self._command_stage(stage, alpha)
         if self.finished:
             return
+
+        if stage.contact_seek and self.stage_elapsed >= 1.0:
+            command_position_error, command_orientation_error = (
+                self._command_pose_error()
+            )
+            if (
+                command_position_error >= self.CONTACT_DETECT_ERROR
+                and command_orientation_error
+                <= self.CONTACT_DETECT_ORIENTATION_DEG
+            ):
+                self.contact_stall_time += self.dt
+            else:
+                self.contact_stall_time = 0.0
+            if self.contact_stall_time >= self.CONTACT_DETECT_HOLD_S:
+                print(
+                    "[자동][천장 접촉 감지] "
+                    f"추종 오차 {command_position_error * 1000:.1f} mm가 "
+                    f"{self.contact_stall_time:.1f}s 지속되어 추가 하강을 멈춥니다."
+                )
+                self.upper_contact_detected = True
+                self._rebase_after_upper_contact()
+                self._finish_stage(stage)
+                return
 
         if self.stage_elapsed + 1.0e-9 < stage.duration_s:
             self.stage_elapsed += self.dt
@@ -218,6 +251,10 @@ class StirfryAutoSequence:
             target_orientation = self._slerp_matrix(
                 self.stage_start_orientation, stage.orientation, alpha
             )
+        self.command_position = np.asarray(target_position, dtype=np.float64)
+        self.command_orientation = np.asarray(
+            target_orientation, dtype=np.float64
+        )
         target_joints, _, ik_error_mm = self.arm.solve_ik(
             target_position,
             target_R=target_orientation,
@@ -249,14 +286,16 @@ class StirfryAutoSequence:
 
     def _build_stages(self, bowl_position):
         # 림보다 10 mm 위에서 75도로 고리 입구를 살짝 연다. 그다음 림
-        # 기준점을 27.47 mm 입구의 중앙에 직접 맞추고, 그 자리에서 수직
-        # 하강해 윗고리 접촉 직전까지 보낸다. 이후 이 접촉축을 고정한
-        # 원호로 -2.32도까지 회전하면 아래 훅도 그릇 바닥에 닿는다.
+        # 기준점을 27.47 mm 입구의 중앙에 직접 맞추고 7.3 mm 하강한다.
+        # 이어 3도 안쪽으로 되돌린 뒤 최대 50 mm를 천천히 하강한다.
+        # 추종 오차가 천장 접촉을 나타내면 실제 정지 위치를 기준으로 뒤의
+        # 잠금·상승 경로를 재정렬한다.
         outer_rim_world = (
             bowl_position + self.bowl_frame @ self.BOWL_NEAR_RIM_LOCAL
         )
         entry_R = self._gripper_rotation(self.VERTICAL_ENTRY_DEG)
         open_R = self._gripper_rotation(self.UPPER_OPEN_DEG)
+        inward_R = self._gripper_rotation(self.UPPER_INWARD_DEG)
         lock_R = self._gripper_rotation(self.LOCK_DEG)
         entry_origin = (
             outer_rim_world
@@ -274,8 +313,12 @@ class StirfryAutoSequence:
             centered_origin
             - self.bowl_frame[:, 2] * self.UPPER_CENTER_DESCENT
         )
+        deep_origin = (
+            seated_origin
+            - self.bowl_frame[:, 2] * self.UPPER_CONTACT_MAX_DESCENT
+        )
         upper_seat_pivot_world = (
-            seated_origin + open_R @ self.UPPER_HOOK_SEAT_LOCAL
+            deep_origin + inward_R @ self.UPPER_HOOK_SEAT_LOCAL
         )
         locked_origin = (
             upper_seat_pivot_world
@@ -314,6 +357,7 @@ class StirfryAutoSequence:
             pivot_local=None,
             pivot_start_deg=None,
             pivot_end_deg=None,
+            contact_seek=False,
         ):
             link_position, link_orientation = self._link6_pose(
                 gripper_position, gripper_orientation
@@ -329,6 +373,7 @@ class StirfryAutoSequence:
                 pivot_local=pivot_local,
                 pivot_start_deg=pivot_start_deg,
                 pivot_end_deg=pivot_end_deg,
+                contact_seek=contact_seek,
             )
 
         staging_position, staging_orientation = self._link6_pose(
@@ -383,10 +428,24 @@ class StirfryAutoSequence:
                 open_R,
             ),
             stage(
-                "상부 고리 안쪽 림 안착 안정화",
+                "고리를 안쪽으로 3도 되돌리기",
                 2.0,
                 seated_origin,
-                open_R,
+                inward_R,
+            ),
+            stage(
+                "천장 접촉까지 최대 50mm 추가 수직 하강",
+                8.0,
+                deep_origin,
+                inward_R,
+                checkpoint="upper_contact_seek",
+                contact_seek=True,
+            ),
+            stage(
+                "상부 고리 천장 접촉 안정화",
+                2.0,
+                deep_origin,
+                inward_R,
             ),
             stage(
                 "상부 접점을 유지하며 하부 훅 회전 잠금",
@@ -395,7 +454,7 @@ class StirfryAutoSequence:
                 lock_R,
                 pivot_world=upper_seat_pivot_world,
                 pivot_local=self.UPPER_HOOK_SEAT_LOCAL,
-                pivot_start_deg=self.UPPER_OPEN_DEG,
+                pivot_start_deg=self.UPPER_INWARD_DEG,
                 pivot_end_deg=self.LOCK_DEG,
             ),
             stage(
@@ -494,6 +553,9 @@ class StirfryAutoSequence:
         self.stage_elapsed = 0.0
         self.arrival_wait = 0.0
         self.wait_report_second = 0
+        self.contact_stall_time = 0.0
+        self.command_position = None
+        self.command_orientation = None
         position, orientation = self.arm.current_pose()
         self.stage_start_position = position.astype(np.float64)
         self.stage_start_orientation = orientation.astype(np.float64)
@@ -507,6 +569,16 @@ class StirfryAutoSequence:
         if stage.joint_target is not None:
             # 다음 Cartesian 단계가 같은 elbow-up IK 분기를 이어받는다.
             self.arm._last_q = stage.joint_target.copy()
+
+        if (
+            stage.checkpoint == "upper_contact_seek"
+            and not self.upper_contact_detected
+        ):
+            self._fail(
+                "추가 50mm 하강 범위 안에서 고리 천장 접촉을 감지하지 "
+                "못했습니다. 잠금 회전을 시작하지 않습니다."
+            )
+            return
 
         if stage.checkpoint == "lock_inspection":
             self._print_grasp_diagnostics(stage)
@@ -535,6 +607,68 @@ class StirfryAutoSequence:
             print("[자동][완료] 접촉 파지 → 상승 → 붓기 동작을 한 번 수행했습니다.")
             return
         self._enter_stage(next_index)
+
+    def _command_pose_error(self):
+        if self.command_position is None or self.command_orientation is None:
+            return 0.0, 0.0
+        actual_position_world, actual_orientation = self._rigid_body_pose(
+            self.arm.actor, self.link6_body_index
+        )
+        actual_position = actual_position_world - np.array(
+            [0.0, 0.0, self.base_z], dtype=np.float64
+        )
+        position_error = float(
+            np.linalg.norm(self.command_position - actual_position)
+        )
+        orientation_error = np.degrees(
+            Rotation.from_matrix(
+                self.command_orientation @ actual_orientation.T
+            ).magnitude()
+        )
+        return position_error, float(orientation_error)
+
+    def _rebase_after_upper_contact(self):
+        """실제 천장 접촉점에 맞춰 뒤의 잠금·상승 경로를 평행 이동한다."""
+        gripper_position, gripper_orientation = self._rigid_body_pose(
+            self.arm.actor, self.gripper_body_index
+        )
+        actual_pivot_world = (
+            gripper_position
+            + gripper_orientation @ self.UPPER_HOOK_SEAT_LOCAL
+        )
+
+        lock_stage_index = next(
+            index
+            for index in range(self.stage_index + 1, len(self.stages))
+            if self.stages[index].pivot_world is not None
+        )
+        planned_pivot_world = self.stages[lock_stage_index].pivot_world
+        translation = actual_pivot_world - planned_pivot_world
+
+        for index in range(self.stage_index + 1, len(self.stages)):
+            original = self.stages[index]
+            pivot_world = original.pivot_world
+            if pivot_world is not None:
+                pivot_world = pivot_world + translation
+            self.stages[index] = replace(
+                original,
+                position=(original.position + translation).astype(np.float32),
+                pivot_world=pivot_world,
+            )
+
+        actual_link_position_world, _ = self._rigid_body_pose(
+            self.arm.actor, self.link6_body_index
+        )
+        actual_link_position = actual_link_position_world - np.array(
+            [0.0, 0.0, self.base_z], dtype=np.float64
+        )
+        descent = max(
+            0.0, float(self.stage_start_position[2] - actual_link_position[2])
+        )
+        print(
+            f"[자동][천장 접촉] 실제 추가 하강량 = {descent * 1000:.1f} mm, "
+            "이 위치를 기준으로 잠금·상승 경로를 재정렬했습니다."
+        )
 
     def _stage_error(self, stage):
         actual_position_world, actual_orientation = self._rigid_body_pose(
