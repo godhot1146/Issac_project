@@ -554,8 +554,8 @@ class StirfryAutoSequence:
                     0.7,
                     seated_origin,
                     seated_R,
-                    position_tolerance=0.002,
-                    orientation_tolerance_deg=0.5,
+                    position_tolerance=self.DIAGONAL_POSITION_TOLERANCE,
+                    orientation_tolerance_deg=1.0,
                 )
             )
 
