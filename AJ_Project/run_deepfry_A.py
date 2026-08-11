@@ -179,8 +179,8 @@ gym.set_rigid_body_color(
 # ============================================================
 # 로봇 스탠드
 #
-# a0509_stand.urdf 원점은 로봇 장착면(윗면) 중심이라
-# 스폰 z를 BASE_Z로 주면 그 높이가 곧 장착면 높이가 된다.
+# a0509_stand.urdf 원점은 바닥면(z=0) 중심이라
+# 스폰 z를 0으로 주면 상판이 BASE_Z 높이에 온다.
 # ============================================================
 
 stand_opts = gymapi.AssetOptions()
@@ -194,7 +194,7 @@ stand_asset = gym.load_asset(
 )
 
 stand_pose = gymapi.Transform()
-stand_pose.p = gymapi.Vec3(0, 0, BASE_Z)
+stand_pose.p = gymapi.Vec3(0, 0, 0)
 
 gym.create_actor(
     env,

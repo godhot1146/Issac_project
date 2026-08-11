@@ -65,11 +65,11 @@ floor_actor = gym.create_actor(
 )
 gym.set_rigid_body_color(env, floor_actor, 0, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(1.0, 1.0, 1.0))
 
-# 로봇팔 거치대(A0509_Stand, STEP→URDF 변환, 0.6x0.9x0.81m). 원점이 로봇 마운트면(윗면)이라
-# z=BASE_Z(=0.81, 스탠드 높이와 동일)에 놓으면 바닥면이 정확히 바닥(z=0)에 닿는다.
+# 로봇팔 거치대(A0509_Stand, STEP→URDF 변환, 0.6x0.9x0.81m). 원점이 바닥면(z=0)이라
+# z=0에 놓으면 바닥면이 정확히 바닥(z=0)에 닿고, 상판은 BASE_Z 높이에 온다.
 stand_opts = gymapi.AssetOptions(); stand_opts.fix_base_link = True
 stand_asset = gym.load_asset(sim, asset_root, "urdf/a0509_stand/a0509_stand.urdf", stand_opts)
-gym.create_actor(env, stand_asset, gymapi.Transform(p=gymapi.Vec3(0, 0, BASE_Z)), "stand", 0, 0)
+gym.create_actor(env, stand_asset, gymapi.Transform(p=gymapi.Vec3(0, 0, 0)), "stand", 0, 0)
 
 # 작업대(WorkTable2, STEP→URDF 변환) 에셋. 오른쪽/뒤 선반 대용으로 아래에서 재사용.
 table_opts = gymapi.AssetOptions(); table_opts.fix_base_link = True
