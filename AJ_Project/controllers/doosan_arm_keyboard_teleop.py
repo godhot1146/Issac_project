@@ -37,7 +37,8 @@ class DoosanArmKeyboardTeleop:
     HOME_Q = np.zeros(6, dtype=np.float32)   # 천장 향해 일자(전관절 0)
 
     def __init__(self, gym, viewer, arm, base_z=0.0,
-                 cart_step=0.004, joint_step=0.01, ori_step_deg=1.5, settle=30):
+                 cart_step=0.004, joint_step=0.01, ori_step_deg=1.5,
+                 settle=30, home_on_start=True):
         self.gym, self.viewer, self.arm = gym, viewer, arm
         self.base_z = base_z
         self.cart_step = cart_step
@@ -62,19 +63,31 @@ class DoosanArmKeyboardTeleop:
         self.held = set()
         self.mode = "tsc"
         self.sel_joint = 0
-        self.joint_target = self.HOME_Q.copy()
-        self.dirty = True
         self._n = 0
 
-        # 초기 자세: 천장 향해 일자
-        arm.go_joints(self.HOME_Q)
-        for _ in range(settle):
-            gym.simulate(arm.sim); gym.fetch_results(arm.sim, True)
+        if home_on_start:
+            # 일반 수동 실행의 초기 자세: 천장 향해 일자
+            self.joint_target = self.HOME_Q.copy()
+            self.dirty = True
+            arm.go_joints(self.HOME_Q)
+            for _ in range(settle):
+                gym.simulate(arm.sim); gym.fetch_results(arm.sim, True)
+        else:
+            # 자동 접근에서 인계받을 때는 홈으로 되돌리지 않고 현재 자세와
+            # 현재 position drive 목표를 그대로 유지한다.
+            self.joint_target = arm.current_joints().copy()
+            self.dirty = False
+
         # TSC 목표(위치+자세)를 현재 손끝에 동기화(튐 방지)
         p, Rm = arm.current_pose()
         self.cart_target = p.astype(np.float32)
         self.ori_R = Rm
         self._print_help()
+        if not home_on_start:
+            print(
+                "[키보드 인계] 현재 그리퍼 자세를 유지한 채 TSC로 시작합니다. "
+                "2번을 누르면 언제든 현재 자세에 다시 동기화됩니다."
+            )
 
     # ---------------------------------------------------------------
     def _print_help(self):

@@ -122,6 +122,7 @@ class StirfryAutoSequence:
         base_z,
         dt=1.0 / 60.0,
         slot_direction_xy=(-1.0, 0.0),
+        manual_handoff=False,
     ):
         self.gym = gym
         self.sim = sim
@@ -130,6 +131,7 @@ class StirfryAutoSequence:
         self.bowl_actor = bowl_actor
         self.base_z = float(base_z)
         self.dt = float(dt)
+        self.manual_handoff = bool(manual_handoff)
 
         arm_body_names = self.gym.get_actor_rigid_body_names(self.env, self.arm.actor)
         self.link6_body_index = arm_body_names.index("link_6")
@@ -161,6 +163,7 @@ class StirfryAutoSequence:
         self.stage_start_bowl_orientation_in_gripper = None
         self.finished = False
         self.failed = False
+        self.handoff_ready = False
         self.expected_seated_bowl_in_gripper = None
         self.command_position = None
         self.command_orientation = None
@@ -171,9 +174,16 @@ class StirfryAutoSequence:
         self.arm.go_joints(self.HOME_Q)
         self.auto_control = StirfryAutoJointControl(self.arm, dt=self.dt)
         self.auto_control.command(self.HOME_Q)
-        print(
-            "[자동] 원본 크기 조리 그릇 1개를 대상으로 접촉 기반 파지·붓기를 시작합니다."
-        )
+        if self.manual_handoff:
+            print(
+                "[자동 접근] 그리퍼를 조리 그릇 앞 비접촉 위치까지 이동한 뒤 "
+                "키보드 미세조작으로 전환합니다."
+            )
+        else:
+            print(
+                "[자동] 원본 크기 조리 그릇 1개를 대상으로 "
+                "접촉 기반 파지·붓기를 시작합니다."
+            )
 
     def update(self):
         """시뮬레이션 루프에서 물리 스텝 전에 매 프레임 한 번 호출한다."""
@@ -468,6 +478,9 @@ class StirfryAutoSequence:
                 2.0,
                 open_origin,
                 entry_R,
+                checkpoint=(
+                    "manual_handoff" if self.manual_handoff else ""
+                ),
             ),
             stage(
                 "잠금 반대 회전으로 상부 고리 입구 열기",
@@ -648,6 +661,8 @@ class StirfryAutoSequence:
                 stage("완료 자세 유지", 1.0, lifted_origin, seated_R),
             ]
         )
+        if self.manual_handoff:
+            return stages[:3]
         return stages
 
     def _gripper_rotation(self, wrist_deg):
@@ -748,6 +763,16 @@ class StirfryAutoSequence:
         if stage.joint_target is not None:
             # 다음 Cartesian 단계가 같은 elbow-up IK 분기를 이어받는다.
             self.arm._last_q = stage.joint_target.copy()
+
+        if stage.checkpoint == "manual_handoff":
+            self.auto_control.capture_current_target()
+            self.handoff_ready = True
+            self.finished = True
+            print(
+                "[자동 접근 완료] 그리퍼가 림보다 10mm 위 비접촉 위치에 "
+                "도착했습니다. 키보드 TSC 미세조작으로 전환합니다."
+            )
+            return
 
         if (
             stage.checkpoint == "upper_contact_seek"

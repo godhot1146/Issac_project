@@ -4,8 +4,8 @@ run_stirfry.py — 두산 A0509 볶음 공정 씬 + 수동/자동 제어
 씬: 볶음 도면을 기준으로 Bonitkit + V2 조리/준비 테이블 + 그릇 11개를
     A0509 작업 반경 안에 배치한다. A0509는 전용 stand 상단 z=0.81에 고정 장착한다.
 제어: 기본은 실행 중 키로 모드를 바꿔가며 직접 조작한다.
-      --auto를 주면 원본 크기 조리 그릇 하나를 접촉으로 걸어 들어 올린 뒤
-      손목을 기울여 붓는 시늉을 한 번 자동 수행한다.
+      --auto를 주면 그리퍼를 조리 그릇 림보다 10 mm 위까지 자동으로
+      이동한 뒤, 현재 자세를 유지한 채 키보드 미세조작으로 전환한다.
 
   ┌─────────────── 키 맵 ───────────────┐
   │ [모드]  1: JSC(관절)  2: TSC(좌표+IK)  3: OSC(좌표+동역학)
@@ -20,7 +20,7 @@ controllers/doosan_arm_keyboard_teleop.py에 분리되어 있다.
 좌표 목표는 '로봇 베이스 기준'. OSC는 월드 텐서를 쓰므로 장착높이(+0.81) 보정해 넘긴다.
 
 실행:  conda activate issac_env  &&  python run_stirfry.py
-       python run_stirfry.py --auto
+       python run_stirfry.py --auto   # 자동 접근 -> 키보드 미세조작
        (OSC용 gymtorch→ninja 필요)
 """
 import os
@@ -129,7 +129,7 @@ args = gymutil.parse_arguments(
         {
             "name": "--auto",
             "action": "store_true",
-            "help": "조리 그릇 하나를 접촉으로 파지해 들어 올리고 한 번 붓는다.",
+            "help": "그릇 앞까지 자동 접근한 뒤 키보드 미세조작으로 전환한다.",
         }
     ],
 )
@@ -262,7 +262,7 @@ gripper rigid: True (fixed to A0509 link_6)
 gripper collision: {GRIPPER_COLLISION_SHAPES} explicit convex meshes
 table fixed: {table_opts.fix_base_link}
 table collision: explicit convex meshes (complete={COMPLETE_TABLE_COLLISION_SHAPES}, prepare={PREPARE_TABLE_COLLISION_SHAPES})
-robot grasp control: {"AUTO (contact only)" if args.auto else "MANUAL"}""")
+robot grasp control: {"HYBRID (auto approach -> manual)" if args.auto else "MANUAL"}""")
 
 # ============================================================ [4] 뷰어 + 키 등록
 viewer = gym.create_viewer(sim, gymapi.CameraProperties())
@@ -273,8 +273,10 @@ gym.viewer_camera_look_at(
     gymapi.Vec3(0.0, 0.25, 0.80),
 )
 
-# 자동 모드는 열고 닫는 관절이나 fake attachment를 사용하지 않는다. CAD에서
-# 검증한 대로 두꺼운 상부를 먼저 댄 뒤 손목을 회전해 하부까지 걸리게 한다.
+from doosan_arm_keyboard_teleop import DoosanArmKeyboardTeleop
+
+# --auto는 접촉 직전의 안전 위치까지만 자동 이동한다. 파지·상승·붓기는
+# 실행하지 않고, 도착한 현재 자세를 그대로 TSC 키보드 조작기에 넘긴다.
 if args.auto:
     from stirfry_auto_sequence import StirfryAutoSequence
 
@@ -287,19 +289,41 @@ if args.auto:
         base_z=BASE_Z,
         dt=sp.dt,
         slot_direction_xy=(-1.0, 0.0),
+        manual_handoff=True,
     )
     teleop = None
 else:
     # 키보드 텔레오프 (JSC/TSC/OSC, 꾹 누르면 연속, TSC 자세 유지)
     # 구현: controllers/doosan_arm_keyboard_teleop.py
-    from doosan_arm_keyboard_teleop import DoosanArmKeyboardTeleop
-
     teleop = DoosanArmKeyboardTeleop(gym, viewer, arm, base_z=BASE_Z)
     auto_sequence = None
 
 while not gym.query_viewer_has_closed(viewer):
     if auto_sequence is not None:
         auto_sequence.update()
+        if auto_sequence.handoff_ready:
+            # 일반 수동 모드의 4 mm/프레임보다 느린 1 mm/프레임과
+            # 0.5 deg/프레임을 사용해 림 주변 접촉을 미세 조정한다.
+            teleop = DoosanArmKeyboardTeleop(
+                gym,
+                viewer,
+                arm,
+                base_z=BASE_Z,
+                cart_step=0.001,
+                joint_step=np.deg2rad(0.2),
+                ori_step_deg=0.5,
+                settle=0,
+                home_on_start=False,
+            )
+            auto_sequence = None
+            print("""
+===== 자동 접근 -> 키보드 미세조작 전환 완료 =====
+ 1) 2번: TSC 재동기화(권장)
+ 2) W/S: X±, A/D: Y±, Q/E: Z± (1 mm/프레임)
+ 3) T/G: pitch±, F/H: roll±, C/V: yaw± (0.5 deg/프레임)
+ 4) 필요하면 1번 JSC -> J/L 관절 선택 -> U/O 미세 회전
+ 주의: R은 홈 복귀이므로 파지 중에는 누르지 마세요.
+==================================================""")
     else:
         teleop.handle_and_apply()   # 이벤트 처리 + 연속동작 + 모드별 제어
 
