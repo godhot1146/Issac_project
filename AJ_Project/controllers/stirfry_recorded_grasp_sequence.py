@@ -123,6 +123,9 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         stages = list(super()._build_stages(bowl_position))
         if len(stages) != 1 or stages[0].checkpoint != "manual_handoff":
             raise RuntimeError("접촉 피벗의 안전 접근 단계를 만들지 못했습니다.")
+        # 비접촉 고공 접근만 25% 단축한다. 충돌 여유가 큰 구간이라
+        # 접촉 안착이나 잠금 회전의 안정성에는 영향을 주지 않는다.
+        stages[0] = replace(stages[0], duration_s=3.0)
 
         bowl_position = np.asarray(bowl_position, dtype=np.float64)
         self.recorded_initial_bowl_position = bowl_position.copy()
@@ -203,13 +206,13 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             [
                 pose_stage(
                     "상부 고리 접촉면을 림 10mm 위로 정렬",
-                    2.0,
+                    1.2,
                     precontact_position,
                     precontact_R,
                 ),
                 pose_stage(
                     "상부 고리 접촉면을 림까지 저속 안착",
-                    1.5,
+                    1.0,
                     seek_position,
                     seek_R,
                     checkpoint="recorded_contact_seek",
@@ -218,7 +221,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 ),
                 pose_stage(
                     "첫 접촉 뒤 상부 접촉면을 2mm 수직 밀착",
-                    0.8,
+                    0.5,
                     preloaded_position,
                     seek_R,
                     checkpoint="recorded_upper_preload",
@@ -228,7 +231,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 pivot_stage,
                 pose_stage(
                     "잠금 성공 뒤 그릇 140mm 즉시 수직 상승",
-                    3.0,
+                    2.0,
                     lifted_position,
                     locked_link_R,
                     checkpoint="recorded_final_lift",
@@ -237,7 +240,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 ),
                 pose_stage(
                     "접촉 피벗 자동 파지 완료 자세 유지",
-                    0.5,
+                    0.25,
                     lifted_position,
                     locked_link_R,
                     checkpoint="recorded_complete",
