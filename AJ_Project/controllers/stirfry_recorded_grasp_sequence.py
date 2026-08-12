@@ -37,15 +37,17 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
     MIN_UPPER_SEAT_CONTACTS = 2
     UPPER_SEAT_CONFIRM_S = 0.50
     PIVOT_DURATION_S = 4.5
-    PIVOT_ROLLING_PRELOAD_M = 0.003
-    PIVOT_RECOVERY_MAX_DESCENT_M = 0.002
-    PIVOT_RECOVERY_DESCENT_SPEED_M_S = 0.006
+    PIVOT_ROLLING_PRELOAD_M = 0.006
+    PIVOT_RECOVERY_MAX_DESCENT_M = 0.010
+    PIVOT_RECOVERY_DESCENT_SPEED_M_S = 0.008
     PIVOT_CONTACT_LOSS_GRACE_S = 0.05
     PIVOT_CONTACT_RECOVERY_HOLD_S = 0.10
-    PIVOT_CONTACT_FAILURE_S = 0.50
-    PIVOT_TOTAL_TIMEOUT_S = 10.0
-    UPPER_CONTACT_TRACK_RADIUS_M = 0.035
-    CONTACT_POINT_FILTER_ALPHA = 0.15
+    PIVOT_CONTACT_FAILURE_S = 1.50
+    PIVOT_TOTAL_TIMEOUT_S = 14.0
+    UPPER_CONTACT_TRACK_RADIUS_M = 0.025
+    UPPER_CONTACT_CAPTURE_CLUSTER_M = 0.006
+    PIVOT_CARTESIAN_CORRECTION_MAX_M = 0.012
+    PIVOT_CARTESIAN_CORRECTION_ALPHA = 0.35
     DIRECT_LIFT_COMMAND_M = 0.140
 
     MIN_LOCK_LIFT_M = 0.015
@@ -77,6 +79,10 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         self.recorded_pivot_contact_stable_time = 0.0
         self.recorded_pivot_contact_ready = True
         self.recorded_pivot_recovery_descent = 0.0
+        self.recorded_pivot_cartesian_correction = np.zeros(
+            3, dtype=np.float64
+        )
+        self.recorded_pivot_anchor_gap = np.zeros(3, dtype=np.float64)
         self.recorded_pivot_last_report_second = -1
         super().__init__(
             gym,
@@ -302,6 +308,8 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             self.recorded_pivot_contact_stable_time = 0.0
             self.recorded_pivot_contact_ready = True
             self.recorded_pivot_recovery_descent = 0.0
+            self.recorded_pivot_cartesian_correction[:] = 0.0
+            self.recorded_pivot_anchor_gap[:] = 0.0
             self.recorded_pivot_last_report_second = -1
 
     def _stage_completion_override(
@@ -384,12 +392,14 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             return None
         return vector[:3] if vector.size >= 3 else None
 
-    def _upper_contact_manifold(self, reference_gripper_local=None):
+    def _upper_contact_manifold(
+        self,
+        reference_gripper_local=None,
+        capture_nearest_cluster=False,
+    ):
         """상부 고리 접촉 패치의 두 물체 로컬 중심과 개수를 반환한다."""
         contacts = self._gripper_bowl_contacts()
-        gripper_points = []
-        bowl_points = []
-        weights = []
+        candidates = []
         position_field_seen = False
 
         for contact in contacts:
@@ -411,31 +421,57 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             if gripper_local is None or bowl_local is None:
                 continue
             position_field_seen = True
-            if (
-                reference_gripper_local is not None
-                and np.linalg.norm(
-                    gripper_local - reference_gripper_local
-                )
-                > self.UPPER_CONTACT_TRACK_RADIUS_M
-            ):
-                continue
             force = self._contact_field(contact, "lambda")
             try:
                 weight = max(abs(float(force)), 1.0e-6)
             except (TypeError, ValueError):
                 weight = 1.0
-            gripper_points.append(gripper_local)
-            bowl_points.append(bowl_local)
-            weights.append(weight)
+            candidates.append((gripper_local, bowl_local, weight))
 
-        if gripper_points:
+        if candidates and reference_gripper_local is not None:
+            if capture_nearest_cluster:
+                # 첫 접촉 전체의 힘 가중 평균은 고리 끝·윗면까지 섞어
+                # 성공 기록점에서 20 mm 이상 벗어났다. 성공 기록점에
+                # 가장 가까운 접촉을 먼저 고르고 그 주변 패치만 사용한다.
+                nearest_gripper = min(
+                    candidates,
+                    key=lambda item: np.linalg.norm(
+                        item[0] - reference_gripper_local
+                    ),
+                )[0]
+                candidates = [
+                    item
+                    for item in candidates
+                    if np.linalg.norm(item[0] - nearest_gripper)
+                    <= self.UPPER_CONTACT_CAPTURE_CLUSTER_M
+                ]
+            else:
+                candidates = [
+                    item
+                    for item in candidates
+                    if np.linalg.norm(
+                        item[0] - reference_gripper_local
+                    )
+                    <= self.UPPER_CONTACT_TRACK_RADIUS_M
+                ]
+
+        if candidates:
             self.recorded_contact_positions_available = True
+            gripper_points = np.asarray(
+                [item[0] for item in candidates], dtype=np.float64
+            )
+            bowl_points = np.asarray(
+                [item[1] for item in candidates], dtype=np.float64
+            )
+            weights = np.asarray(
+                [item[2] for item in candidates], dtype=np.float64
+            )
             weights = np.asarray(weights, dtype=np.float64)
             weights /= np.sum(weights)
             return (
-                np.sum(np.asarray(gripper_points) * weights[:, None], axis=0),
-                np.sum(np.asarray(bowl_points) * weights[:, None], axis=0),
-                len(gripper_points),
+                np.sum(gripper_points * weights[:, None], axis=0),
+                np.sum(bowl_points * weights[:, None], axis=0),
+                len(candidates),
             )
 
         if contacts and not position_field_seen:
@@ -496,7 +532,10 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             self.bowl_actor, 0
         )
         gripper_local, bowl_local, contact_count = (
-            self._upper_contact_manifold()
+            self._upper_contact_manifold(
+                self.RECORDED_UPPER_CONTACT_LOCAL,
+                capture_nearest_cluster=True,
+            )
         )
         if gripper_local is not None and bowl_local is not None:
             gripper_contact_world = (
@@ -523,6 +562,9 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         )
         self.recorded_upper_gripper_local = actual_gripper_local.copy()
         self.recorded_upper_bowl_local = actual_bowl_local.copy()
+        capture_offset = np.linalg.norm(
+            actual_gripper_local - self.RECORDED_UPPER_CONTACT_LOCAL
+        )
         actual_wrist_deg = self._wrist_deg(gripper_orientation)
 
         pivot_index = next(
@@ -567,6 +609,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             "[접촉 피벗][실제 상부 접촉 패치 설정] "
             f"{contact_source}, 접촉 {contact_count}개, "
             f"계획 대비 {np.linalg.norm(pivot_translation) * 1000:.1f} mm, "
+            f"기록 접점 대비 {capture_offset * 1000:.1f} mm, "
             f"손목 {wrist_shift_deg:+.2f} deg 보정, "
             "그리퍼 로컬 접점 "
             f"{np.round(actual_gripper_local * 1000, 1)} mm"
@@ -602,6 +645,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         gripper_position = (
             pivot_world
             - gripper_orientation @ self.recorded_upper_gripper_local
+            + self.recorded_pivot_cartesian_correction
             - world_up * total_descent
         )
         target_position, target_orientation = self._link6_pose(
@@ -627,6 +671,44 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             target_joints, settling=alpha >= 1.0
         )
 
+    def _update_pivot_anchor_correction(self):
+        """두 고정 접점의 실제 3D 간격을 다음 팔 목표에 폐루프 반영한다."""
+        gripper_position, gripper_orientation = self._rigid_body_pose(
+            self.arm.actor, self.gripper_body_index
+        )
+        bowl_position, bowl_orientation = self._rigid_body_pose(
+            self.bowl_actor, 0
+        )
+        actual_gripper_anchor = (
+            gripper_position
+            + gripper_orientation @ self.recorded_upper_gripper_local
+        )
+        actual_bowl_anchor = (
+            bowl_position
+            + bowl_orientation @ self.recorded_upper_bowl_local
+        )
+        anchor_gap = actual_bowl_anchor - actual_gripper_anchor
+        correction_gap = anchor_gap.copy()
+        # 양의 Z 간격은 의도적으로 그리퍼를 림보다 조금 낮게 눌러 생긴다.
+        # 이를 위쪽 보정으로 상쇄하지 않고, 수평 오차와 고리가 림보다
+        # 위로 들린 경우(음의 Z)만 Cartesian 보정한다.
+        correction_gap[2] = min(correction_gap[2], 0.0)
+        gap_norm = float(np.linalg.norm(correction_gap))
+        if gap_norm > self.PIVOT_CARTESIAN_CORRECTION_MAX_M:
+            correction_target = (
+                correction_gap
+                * self.PIVOT_CARTESIAN_CORRECTION_MAX_M
+                / gap_norm
+            )
+        else:
+            correction_target = correction_gap
+        self.recorded_pivot_anchor_gap = anchor_gap
+        self.recorded_pivot_cartesian_correction = self._lerp(
+            self.recorded_pivot_cartesian_correction,
+            correction_target,
+            self.PIVOT_CARTESIAN_CORRECTION_ALPHA,
+        )
+
     def _update_contact_following_pivot(self, stage):
         """접촉을 폐루프로 유지하고 접촉 손실 중에는 회전을 정지한다."""
         bowl_tilt_deg = self._recorded_bowl_tilt_deg()
@@ -638,23 +720,13 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             )
             return
 
-        gripper_local, bowl_local, contact_count = (
+        _, _, contact_count = (
             self._upper_contact_manifold(
                 self.recorded_upper_gripper_local
             )
         )
-        if gripper_local is not None and bowl_local is not None:
-            filter_alpha = self.CONTACT_POINT_FILTER_ALPHA
-            self.recorded_upper_gripper_local = self._lerp(
-                self.recorded_upper_gripper_local,
-                gripper_local,
-                filter_alpha,
-            )
-            self.recorded_upper_bowl_local = self._lerp(
-                self.recorded_upper_bowl_local,
-                bowl_local,
-                filter_alpha,
-            )
+        raw_contact_count = self._gripper_bowl_contact_count()
+        self._update_pivot_anchor_correction()
 
         if contact_count > 0:
             self.recorded_pivot_contact_loss_time = 0.0
@@ -718,9 +790,13 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             print(
                 "[접촉 피벗][추종] "
                 f"회전 {self.recorded_pivot_progress * 100:.0f}%, "
-                f"상부 접촉 {contact_count}개, "
+                f"상부/전체 접촉 {contact_count}/{raw_contact_count}개, "
                 "수직 보정 "
-                f"{commanded_descent * 1000:.1f} mm"
+                f"{commanded_descent * 1000:.1f} mm, "
+                "접점 간격 "
+                f"{np.linalg.norm(self.recorded_pivot_anchor_gap) * 1000:.1f} mm, "
+                "3D 보정 "
+                f"{np.linalg.norm(self.recorded_pivot_cartesian_correction) * 1000:.1f} mm"
             )
 
         if (
@@ -732,7 +808,8 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         ):
             self._print_grasp_diagnostics(stage)
             self._fail(
-                "상부 접촉이 끊긴 뒤 2mm 수직 하강 범위에서도 "
+                "상부 접촉이 끊긴 뒤 10mm 수직 하강과 3D 접점 "
+                "오차 보정 범위에서도 "
                 "재접촉하지 못했습니다."
             )
             return
@@ -740,7 +817,8 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         if self.recorded_pivot_wall_time >= self.PIVOT_TOTAL_TIMEOUT_S:
             self._print_grasp_diagnostics(stage)
             self._fail(
-                "상부 접촉 유지 피벗이 10초 안에 잠금 조건을 "
+                "상부 접촉 유지 피벗이 "
+                f"{self.PIVOT_TOTAL_TIMEOUT_S:.0f}초 안에 잠금 조건을 "
                 "충족하지 못했습니다."
             )
             return
@@ -917,7 +995,22 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         super()._finish_stage(stage)
 
     def _print_pose_diagnostics(self, stage):
-        super()._print_pose_diagnostics(stage)
+        diagnostic_stage = stage
+        if (
+            stage.checkpoint == "recorded_pivot_lock"
+            and self.command_position is not None
+            and self.command_orientation is not None
+        ):
+            diagnostic_stage = replace(
+                stage,
+                position=np.asarray(
+                    self.command_position, dtype=np.float32
+                ),
+                orientation=np.asarray(
+                    self.command_orientation, dtype=np.float64
+                ),
+            )
+        super()._print_pose_diagnostics(diagnostic_stage)
         if self.recorded_initial_bowl_position is not None:
             print(
                 "  그릇 총 상승량 = "
@@ -926,4 +1019,13 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             print(
                 "  그릇 초기 대비 기울기 = "
                 f"{self._recorded_bowl_tilt_deg():.2f} deg"
+            )
+        if stage.checkpoint == "recorded_pivot_lock":
+            print(
+                "  상부 고정 접점 3D 간격 = "
+                f"{np.linalg.norm(self.recorded_pivot_anchor_gap) * 1000:.1f} mm"
+            )
+            print(
+                "  팔 전체 Cartesian 접점 보정 = "
+                f"{np.round(self.recorded_pivot_cartesian_correction * 1000, 1)} mm"
             )
