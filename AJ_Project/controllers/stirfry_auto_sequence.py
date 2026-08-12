@@ -62,6 +62,7 @@ class StirfryAutoSequence:
     VERTICAL_STAGING_CLEARANCE = 0.18
     UPPER_PRECONTACT_CLEARANCE = 0.04
     UPPER_INSERT_CLEARANCE = 0.010
+    MANUAL_HANDOFF_CLEARANCE = 0.030
     UPPER_CENTER_DESCENT = 0.007326201
     UPPER_CONTACT_MAX_DESCENT = 0.050
     DIAGONAL_SEAT_CYCLES = 3
@@ -378,6 +379,10 @@ class StirfryAutoSequence:
             entry_origin
             + self.bowl_frame[:, 2] * self.UPPER_INSERT_CLEARANCE
         )
+        manual_handoff_origin = (
+            entry_origin
+            + self.bowl_frame[:, 2] * self.MANUAL_HANDOFF_CLEARANCE
+        )
         centered_origin = (
             outer_rim_world
             - open_R @ self.UPPER_MOUTH_CENTER_LOCAL
@@ -474,9 +479,13 @@ class StirfryAutoSequence:
                 entry_R,
             ),
             stage(
-                "두꺼운 상부 고리를 림보다 10mm 위로 하강",
+                (
+                    "두꺼운 상부 고리를 림보다 30mm 위 안전거리로 하강"
+                    if self.manual_handoff
+                    else "두꺼운 상부 고리를 림보다 10mm 위로 하강"
+                ),
                 2.0,
-                open_origin,
+                manual_handoff_origin if self.manual_handoff else open_origin,
                 entry_R,
                 checkpoint=(
                     "manual_handoff" if self.manual_handoff else ""
@@ -769,7 +778,7 @@ class StirfryAutoSequence:
             self.handoff_ready = True
             self.finished = True
             print(
-                "[자동 접근 완료] 그리퍼가 림보다 10mm 위 비접촉 위치에 "
+                "[자동 접근 완료] 그리퍼가 림보다 30mm 위 안전 위치에 "
                 "도착했습니다. 키보드 TSC 미세조작으로 전환합니다."
             )
             return

@@ -4,7 +4,7 @@ run_stirfry.py — 두산 A0509 볶음 공정 씬 + 수동/자동 제어
 씬: 볶음 도면을 기준으로 Bonitkit + V2 조리/준비 테이블 + 그릇 11개를
     A0509 작업 반경 안에 배치한다. A0509는 전용 stand 상단 z=0.81에 고정 장착한다.
 제어: 기본은 실행 중 키로 모드를 바꿔가며 직접 조작한다.
-      --auto를 주면 그리퍼를 조리 그릇 림보다 10 mm 위까지 자동으로
+      --auto를 주면 그리퍼를 조리 그릇 림보다 30 mm 위까지 자동으로
       이동한 뒤, 현재 자세를 유지한 채 키보드 미세조작으로 전환한다.
 
   ┌─────────────── 키 맵 ───────────────┐
@@ -277,7 +277,7 @@ from doosan_arm_keyboard_teleop import DoosanArmKeyboardTeleop
 from stirfry_arm_keyboard_teleop import StirfryArmKeyboardTeleop
 from stirfry_teleop_recorder import StirfryTeleopRecorder
 
-# --auto는 접촉 직전의 안전 위치까지만 자동 이동한다. 파지·상승·붓기는
+# --auto는 림보다 30 mm 위의 안전 위치까지만 자동 이동한다. 파지·상승·붓기는
 # 실행하지 않고, 도착한 현재 자세를 그대로 TSC 키보드 조작기에 넘긴다.
 if args.auto:
     from stirfry_auto_sequence import StirfryAutoSequence
@@ -332,7 +332,7 @@ while not gym.query_viewer_has_closed(viewer):
             )
             print("""
 ===== 자동 접근 -> 키보드 미세조작 전환 완료 =====
- 1) 2번: TSC 재동기화(권장)
+ 1) 2번: 현재 자세에서 안전 TSC 재동기화(선택)
  2) W/S: X±, A/D: Y±, Q/E: Z± (1 mm/프레임)
  3) T/G: pitch±, F/H: roll±, C/V: yaw± (0.5 deg/프레임)
  4) 필요하면 1번 JSC -> J/L 관절 선택 -> U/O 미세 회전

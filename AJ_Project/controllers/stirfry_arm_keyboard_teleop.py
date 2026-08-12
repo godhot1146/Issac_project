@@ -12,6 +12,7 @@ class StirfryArmKeyboardTeleop(DoosanArmKeyboardTeleop):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._success_requested = False
+        self._sync_tsc_without_ik()
         self.gym.subscribe_viewer_keyboard_event(
             self.viewer, gymapi.KEY_ENTER, "trace_success"
         )
@@ -19,6 +20,16 @@ class StirfryArmKeyboardTeleop(DoosanArmKeyboardTeleop):
             "[수동 궤적 기록] 그릇을 들어 올리는 데 성공하면 ENTER를 "
             "눌러 성공 시점을 기록하세요."
         )
+
+    def _sync_tsc_without_ik(self):
+        """현재 관절 자세를 그대로 고정하고 TSC 기준만 다시 맞춘다."""
+        current_joints = self.arm.current_joints().copy()
+        self.mode = "tsc"
+        self.joint_target = current_joints.copy()
+        self.arm._last_q = current_joints.copy()
+        self.arm.go_joints(current_joints)
+        self._sync_cart()
+        self.dirty = False
 
     def handle_and_apply(self):
         """공용 조작 동작을 유지하면서 ENTER 성공 표시를 함께 처리한다."""
@@ -35,10 +46,8 @@ class StirfryArmKeyboardTeleop(DoosanArmKeyboardTeleop):
                 self.dirty = True
                 print("[모드] JSC")
             elif action == "mode_tsc":
-                self.mode = "tsc"
-                self._sync_cart()
-                self.dirty = True
-                print("[모드] TSC")
+                self._sync_tsc_without_ik()
+                print("[모드] TSC (현재 자세에서 안전 재동기화)")
             elif action == "mode_osc":
                 self.mode = "osc"
                 self._sync_cart()
