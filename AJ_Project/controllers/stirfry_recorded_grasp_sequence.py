@@ -1,10 +1,10 @@
 """상부 고리 접촉점을 피벗으로 사용하는 볶음 그릇 자동 파지 시퀀스.
 
 성공한 TSC 기록에서 상부 고리와 림의 실제 접촉 위치 및 손목 회전 범위를
-추출했다. 그리퍼를 림에 안착한 뒤 손목 관절만 돌리지 않고, 팔 전체의 IK를
-매 프레임 다시 풀어 상부 접촉점이 움직이지 않도록 link_6를 원호 이동한다.
-하부 고리가 걸리는 회전 후반에는 피벗축도 위로 이동해 그릇을 자연스럽게
-들어 올린다. 공용 키보드 텔레오프는 수정하거나 사용하지 않는다.
+추출했다. 그리퍼를 림에 수직 안착한 뒤 손목 관절만 돌리지 않고, 팔 전체의
+IK를 매 프레임 다시 풀어 상부 접촉면을 따라 link_6를 원호 이동한다. 회전
+중에는 현재 그릇 자세와 PhysX 접촉 패치를 추종하고, 접촉이 끊기면 회전을
+멈춘 채 조금 하강해 재접촉한다. 공용 키보드 텔레오프는 수정하지 않는다.
 """
 
 from dataclasses import replace
@@ -21,31 +21,31 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
     # 39-part 성공 TRACE에서 최초 안정 접촉 당시의 near rim을 그리퍼
     # 좌표로 역산한 값이다. 기존 CAD 천장점 [0.150, 0, 0.031]보다 실제
     # 접촉은 약 17 mm 안쪽, 13 mm 아래에서 형성됐다. 이 값은 최초 접촉
-    # 탐색에만 쓴다. 5 mm 추가 삽입하고 수직 재접촉한 뒤 접촉면을 2 mm
-    # 더 눌러 안정화한다. 그때의 실제 림 위치를 그리퍼 로컬로 다시
-    # 투영해 연속 회전의 피벗점을 갱신한다.
+    # 탐색에만 쓴다. 별도 수평 삽입 없이 수직으로 접촉면을 2 mm 더 눌러
+    # 안정화한 뒤 PhysX 접촉 패치를 연속 회전의 피벗으로 사용한다.
     RECORDED_UPPER_CONTACT_LOCAL = np.array(
         [0.1334, 0.0, 0.0184], dtype=np.float64
     )
 
     # 성공 TRACE의 최초 안정 접촉 자세와 최종 잠금 자세.
     PIVOT_START_DEG = 59.3868
-    PIVOT_LIFT_START_DEG = 14.8858
     PIVOT_END_DEG = -4.6149
-    PIVOT_LIFT_START_ALPHA = (
-        (PIVOT_START_DEG - PIVOT_LIFT_START_DEG)
-        / (PIVOT_START_DEG - PIVOT_END_DEG)
-    )
 
     PRECONTACT_CLEARANCE_M = 0.010
     CONTACT_SEEK_PENETRATION_M = 0.004
-    UPPER_INSERT_DEPTH_M = 0.005
-    MIN_UPPER_INSERT_M = 0.004
-    UPPER_RESEAT_MAX_DESCENT_M = 0.012
     UPPER_SEAT_PRELOAD_M = 0.002
     MIN_UPPER_SEAT_CONTACTS = 2
     UPPER_SEAT_CONFIRM_S = 0.50
-    LOCK_PIVOT_RISE_M = 0.045
+    PIVOT_DURATION_S = 4.5
+    PIVOT_ROLLING_PRELOAD_M = 0.003
+    PIVOT_RECOVERY_MAX_DESCENT_M = 0.002
+    PIVOT_RECOVERY_DESCENT_SPEED_M_S = 0.006
+    PIVOT_CONTACT_LOSS_GRACE_S = 0.05
+    PIVOT_CONTACT_RECOVERY_HOLD_S = 0.10
+    PIVOT_CONTACT_FAILURE_S = 0.50
+    PIVOT_TOTAL_TIMEOUT_S = 10.0
+    UPPER_CONTACT_TRACK_RADIUS_M = 0.035
+    CONTACT_POINT_FILTER_ALPHA = 0.15
     DIRECT_LIFT_COMMAND_M = 0.140
 
     MIN_LOCK_LIFT_M = 0.015
@@ -68,6 +68,16 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         self.recorded_initial_bowl_position = None
         self.recorded_initial_bowl_orientation = None
         self.recorded_contact_time = 0.0
+        self.recorded_upper_gripper_local = None
+        self.recorded_upper_bowl_local = None
+        self.recorded_contact_positions_available = None
+        self.recorded_pivot_progress = 0.0
+        self.recorded_pivot_wall_time = 0.0
+        self.recorded_pivot_contact_loss_time = 0.0
+        self.recorded_pivot_contact_stable_time = 0.0
+        self.recorded_pivot_contact_ready = True
+        self.recorded_pivot_recovery_descent = 0.0
+        self.recorded_pivot_last_report_second = -1
         super().__init__(
             gym,
             sim,
@@ -96,11 +106,9 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         )
         print(
             "[접촉 피벗 자동 파지] "
-            f"첫 접촉 뒤 안쪽으로 {self.UPPER_INSERT_DEPTH_M * 1000:.0f} mm "
-            "추가 삽입 후 수직 재안착·2 mm 면 밀착, "
+            "수평 삽입 없이 수직 안착·2 mm 면 밀착 후, "
             f"손목 {self.PIVOT_START_DEG:.1f} -> "
-            f"{self.PIVOT_END_DEG:.1f} deg, 후반 피벗 상승 "
-            f"{self.LOCK_PIVOT_RISE_M * 1000:.0f} mm"
+            f"{self.PIVOT_END_DEG:.1f} deg 동안 실제 접촉면을 추종합니다."
         )
 
     def _build_stages(self, bowl_position):
@@ -158,42 +166,23 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             precontact_pivot, start_R
         )
         seek_position, seek_R = link_pose_for_pivot(seek_pivot, start_R)
-        seek_gripper_position = (
-            seek_pivot - start_R @ self.RECORDED_UPPER_CONTACT_LOCAL
-        )
-        inserted_gripper_position = (
-            seek_gripper_position
-            + self.bowl_frame[:, 0] * self.UPPER_INSERT_DEPTH_M
-        )
-        inserted_position, inserted_R = self._link6_pose(
-            inserted_gripper_position, start_R
-        )
-        reseated_position = (
-            inserted_position - up * self.UPPER_RESEAT_MAX_DESCENT_M
-        )
-        preloaded_position = (
-            reseated_position - up * self.UPPER_SEAT_PRELOAD_M
-        )
+        preloaded_position = seek_position - up * self.UPPER_SEAT_PRELOAD_M
 
         pivot_start_world = near_rim_world.copy()
-        pivot_end_world = (
-            pivot_start_world + up * self.LOCK_PIVOT_RISE_M
-        )
         locked_position, locked_link_R = link_pose_for_pivot(
-            pivot_end_world, locked_R
+            pivot_start_world, locked_R
         )
         pivot_stage = _PoseStage(
-            name="상부 접촉점 기준 연속 회전·후반 상승 잠금",
-            duration_s=4.5,
+            name="상부 실제 접촉면 추종 회전·하부 훅 잠금",
+            duration_s=self.PIVOT_DURATION_S,
             position=locked_position.astype(np.float32),
             orientation=locked_link_R.astype(np.float64),
             checkpoint="recorded_pivot_lock",
             pivot_world=pivot_start_world,
-            pivot_end_world=pivot_end_world,
+            pivot_end_world=None,
             pivot_local=self.RECORDED_UPPER_CONTACT_LOCAL,
             pivot_start_deg=self.PIVOT_START_DEG,
             pivot_end_deg=self.PIVOT_END_DEG,
-            pivot_motion_start=self.PIVOT_LIFT_START_ALPHA,
             position_tolerance=0.015,
             orientation_tolerance_deg=5.0,
         )
@@ -220,28 +209,10 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                     orientation_tolerance_deg=0.8,
                 ),
                 pose_stage(
-                    "상부 고리를 그릇 안쪽으로 5mm 삽입",
-                    1.2,
-                    inserted_position,
-                    inserted_R,
-                    checkpoint="recorded_upper_insert",
-                    position_tolerance=0.003,
-                    orientation_tolerance_deg=1.0,
-                ),
-                pose_stage(
-                    "삽입 자세에서 상부 접촉면까지 수직 재하강",
-                    1.5,
-                    reseated_position,
-                    inserted_R,
-                    checkpoint="recorded_upper_reseat",
-                    position_tolerance=0.001,
-                    orientation_tolerance_deg=0.8,
-                ),
-                pose_stage(
-                    "재접촉 뒤 상부 접촉면을 2mm 추가 밀착",
+                    "첫 접촉 뒤 상부 접촉면을 2mm 수직 밀착",
                     0.8,
                     preloaded_position,
-                    inserted_R,
+                    seek_R,
                     checkpoint="recorded_upper_preload",
                     position_tolerance=0.0005,
                     orientation_tolerance_deg=0.8,
@@ -270,11 +241,21 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         return stages
 
     def update(self):
+        if (
+            not self.finished
+            and self.stage_index >= 0
+            and self.stages[self.stage_index].checkpoint
+            == "recorded_pivot_lock"
+        ):
+            self._update_contact_following_pivot(
+                self.stages[self.stage_index]
+            )
+            return
+
         if not self.finished and self.stage_index >= 0:
             stage = self.stages[self.stage_index]
             if stage.checkpoint in {
                 "recorded_contact_seek",
-                "recorded_upper_reseat",
                 "recorded_upper_preload",
             }:
                 contact_count = self._gripper_bowl_contact_count()
@@ -310,41 +291,26 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                     )
                     self._finish_stage(stage)
                     return
-
-        if (
-            not self.finished
-            and self.stage_index >= 0
-            and self.stages[self.stage_index].checkpoint
-            == "recorded_pivot_lock"
-            and self._recorded_bowl_tilt_deg() > self.MAX_LOCK_TILT_DEG
-        ):
-            stage = self.stages[self.stage_index]
-            self._print_grasp_diagnostics(stage)
-            self._fail(
-                "접촉점 피벗 회전 중 그릇 기울기가 "
-                f"{self._recorded_bowl_tilt_deg():.2f}도로 커졌습니다."
-            )
-            return
         super().update()
+
+    def _enter_stage(self, index):
+        super()._enter_stage(index)
+        if self.stages[index].checkpoint == "recorded_pivot_lock":
+            self.recorded_pivot_progress = 0.0
+            self.recorded_pivot_wall_time = 0.0
+            self.recorded_pivot_contact_loss_time = 0.0
+            self.recorded_pivot_contact_stable_time = 0.0
+            self.recorded_pivot_contact_ready = True
+            self.recorded_pivot_recovery_descent = 0.0
+            self.recorded_pivot_last_report_second = -1
 
     def _stage_completion_override(
         self, stage, position_error, orientation_error
     ):
-        if stage.checkpoint in {
-            "recorded_contact_seek",
-            "recorded_upper_reseat",
-        }:
+        if stage.checkpoint == "recorded_contact_seek":
             count = self._gripper_bowl_contact_count()
             if count > 0:
                 return f"그리퍼-그릇 접촉 {count}개 확인"
-            return None
-
-        if stage.checkpoint == "recorded_upper_insert":
-            advance = self._recorded_inward_advance()
-            if advance >= self.MIN_UPPER_INSERT_M:
-                return (
-                    f"그릇 대비 안쪽으로 {advance * 1000:.1f} mm 삽입"
-                )
             return None
 
         if stage.checkpoint == "recorded_upper_preload":
@@ -363,8 +329,8 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         if stage.checkpoint == "recorded_pivot_lock":
             if bowl_lift >= self.MIN_LOCK_LIFT_M:
                 return (
-                    f"후반 피벗 상승으로 그릇 {bowl_lift * 1000:.1f} mm "
-                    "추종 확인"
+                    f"자연 잠금 회전으로 그릇 {bowl_lift * 1000:.1f} mm "
+                    "상승 확인"
                 )
             return None
 
@@ -373,68 +339,116 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 return f"그릇 총 상승량 {bowl_lift * 1000:.1f} mm 확인"
         return None
 
-    def _gripper_bowl_contact_count(self):
-        count = 0
+    def _gripper_bowl_contacts(self):
+        contacts = []
         for contact in self.gym.get_env_rigid_contacts(self.env):
             bodies = {int(contact["body0"]), int(contact["body1"])}
             if bodies == {self.gripper_env_body, self.bowl_env_body}:
-                count += 1
-        return count
+                contacts.append(contact)
+        return contacts
 
-    def _retarget_recorded_insertion_from_contact(self):
-        gripper_position, gripper_orientation = self._rigid_body_pose(
-            self.arm.actor, self.gripper_body_index
-        )
-        target_gripper_position = (
-            gripper_position
-            + self.bowl_frame[:, 0] * self.UPPER_INSERT_DEPTH_M
-        )
-        target_position, target_orientation = self._link6_pose(
-            target_gripper_position, gripper_orientation
-        )
-        insertion_index = next(
-            index
-            for index in range(self.stage_index + 1, len(self.stages))
-            if self.stages[index].checkpoint == "recorded_upper_insert"
-        )
-        self.stages[insertion_index] = replace(
-            self.stages[insertion_index],
-            position=target_position.astype(np.float32),
-            orientation=target_orientation.astype(np.float64),
-        )
-        print(
-            "[접촉 피벗][상부 삽입 목표] 실제 첫 접촉 자세에서 "
-            f"그릇 중심 방향 {self.UPPER_INSERT_DEPTH_M * 1000:.0f} mm"
-        )
+    def _gripper_bowl_contact_count(self):
+        return len(self._gripper_bowl_contacts())
 
-    def _retarget_recorded_reseat_from_insertion(self):
-        gripper_position, gripper_orientation = self._rigid_body_pose(
-            self.arm.actor, self.gripper_body_index
-        )
-        target_gripper_position = (
-            gripper_position
-            - self.bowl_frame[:, 2] * self.UPPER_RESEAT_MAX_DESCENT_M
-        )
-        target_position, target_orientation = self._link6_pose(
-            target_gripper_position, gripper_orientation
-        )
-        reseat_index = next(
-            index
-            for index in range(self.stage_index + 1, len(self.stages))
-            if self.stages[index].checkpoint == "recorded_upper_reseat"
-        )
-        self.stages[reseat_index] = replace(
-            self.stages[reseat_index],
-            position=target_position.astype(np.float32),
-            orientation=target_orientation.astype(np.float64),
-        )
-        print(
-            "[접촉 피벗][상부 재접촉 목표] 삽입 완료 자세에서 수직 아래로 "
-            f"최대 {self.UPPER_RESEAT_MAX_DESCENT_M * 1000:.0f} mm"
-        )
+    @staticmethod
+    def _contact_field(contact, *names):
+        for name in names:
+            try:
+                return contact[name]
+            except (KeyError, IndexError, TypeError, ValueError):
+                pass
+            try:
+                return getattr(contact, name)
+            except AttributeError:
+                pass
+        return None
 
-    def _retarget_recorded_preload_from_reseat(self):
-        """첫 재접촉 자세에서 아래로 더 눌러 점 접촉을 면 접촉으로 만든다."""
+    @staticmethod
+    def _vec3_array(value):
+        if value is None:
+            return None
+        try:
+            return np.array(
+                [value["x"], value["y"], value["z"]],
+                dtype=np.float64,
+            )
+        except (KeyError, IndexError, TypeError, ValueError):
+            pass
+        if all(hasattr(value, axis) for axis in ("x", "y", "z")):
+            return np.array(
+                [value.x, value.y, value.z], dtype=np.float64
+            )
+        try:
+            vector = np.asarray(value, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        return vector[:3] if vector.size >= 3 else None
+
+    def _upper_contact_manifold(self, reference_gripper_local=None):
+        """상부 고리 접촉 패치의 두 물체 로컬 중심과 개수를 반환한다."""
+        contacts = self._gripper_bowl_contacts()
+        gripper_points = []
+        bowl_points = []
+        weights = []
+        position_field_seen = False
+
+        for contact in contacts:
+            gripper_is_body0 = (
+                int(contact["body0"]) == self.gripper_env_body
+            )
+            gripper_value = self._contact_field(
+                contact,
+                "localPos0" if gripper_is_body0 else "localPos1",
+                "local_pos0" if gripper_is_body0 else "local_pos1",
+            )
+            bowl_value = self._contact_field(
+                contact,
+                "localPos1" if gripper_is_body0 else "localPos0",
+                "local_pos1" if gripper_is_body0 else "local_pos0",
+            )
+            gripper_local = self._vec3_array(gripper_value)
+            bowl_local = self._vec3_array(bowl_value)
+            if gripper_local is None or bowl_local is None:
+                continue
+            position_field_seen = True
+            if (
+                reference_gripper_local is not None
+                and np.linalg.norm(
+                    gripper_local - reference_gripper_local
+                )
+                > self.UPPER_CONTACT_TRACK_RADIUS_M
+            ):
+                continue
+            force = self._contact_field(contact, "lambda")
+            try:
+                weight = max(abs(float(force)), 1.0e-6)
+            except (TypeError, ValueError):
+                weight = 1.0
+            gripper_points.append(gripper_local)
+            bowl_points.append(bowl_local)
+            weights.append(weight)
+
+        if gripper_points:
+            self.recorded_contact_positions_available = True
+            weights = np.asarray(weights, dtype=np.float64)
+            weights /= np.sum(weights)
+            return (
+                np.sum(np.asarray(gripper_points) * weights[:, None], axis=0),
+                np.sum(np.asarray(bowl_points) * weights[:, None], axis=0),
+                len(gripper_points),
+            )
+
+        if contacts and not position_field_seen:
+            if self.recorded_contact_positions_available is not False:
+                print(
+                    "[접촉 피벗][접촉 좌표 경고] localPos0/1 필드를 "
+                    "읽지 못해 접촉 개수와 이동 림 기준점으로 추종합니다."
+                )
+            self.recorded_contact_positions_available = False
+            return None, None, len(contacts)
+        return None, None, 0
+
+    def _retarget_recorded_preload_from_contact(self):
         gripper_position, gripper_orientation = self._rigid_body_pose(
             self.arm.actor, self.gripper_body_index
         )
@@ -456,7 +470,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             orientation=target_orientation.astype(np.float64),
         )
         print(
-            "[접촉 피벗][상부 면 밀착 목표] 첫 재접촉 자세에서 수직 "
+            "[접촉 피벗][상부 면 밀착 목표] 첫 접촉 자세에서 수직 "
             f"아래로 {self.UPPER_SEAT_PRELOAD_M * 1000:.0f} mm 추가 하강, "
             f"접촉 {self.MIN_UPPER_SEAT_CONTACTS}개 이상을 "
             f"{self.UPPER_SEAT_CONFIRM_S:.2f}s 유지"
@@ -478,11 +492,37 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         gripper_position, gripper_orientation = self._rigid_body_pose(
             self.arm.actor, self.gripper_body_index
         )
-        actual_pivot_world = self._current_near_rim_world()
-        actual_pivot_local = (
-            gripper_orientation.T
-            @ (actual_pivot_world - gripper_position)
+        bowl_position, bowl_orientation = self._rigid_body_pose(
+            self.bowl_actor, 0
         )
+        gripper_local, bowl_local, contact_count = (
+            self._upper_contact_manifold()
+        )
+        if gripper_local is not None and bowl_local is not None:
+            gripper_contact_world = (
+                gripper_position + gripper_orientation @ gripper_local
+            )
+            bowl_contact_world = (
+                bowl_position + bowl_orientation @ bowl_local
+            )
+            actual_pivot_world = 0.5 * (
+                gripper_contact_world + bowl_contact_world
+            )
+            contact_source = "PhysX 상부 접촉 패치"
+        else:
+            actual_pivot_world = self._current_near_rim_world()
+            contact_source = "이동 림 기준점 대체값"
+
+        # 두 물체에서 같은 월드 점을 가리키도록 로컬 좌표를 다시 만든다.
+        # 이후 그릇이 움직여도 bowl local 점을 월드로 변환해 피벗을 추종한다.
+        actual_gripper_local = gripper_orientation.T @ (
+            actual_pivot_world - gripper_position
+        )
+        actual_bowl_local = bowl_orientation.T @ (
+            actual_pivot_world - bowl_position
+        )
+        self.recorded_upper_gripper_local = actual_gripper_local.copy()
+        self.recorded_upper_bowl_local = actual_bowl_local.copy()
         actual_wrist_deg = self._wrist_deg(gripper_orientation)
 
         pivot_index = next(
@@ -495,9 +535,9 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         wrist_shift_deg = actual_wrist_deg - original.pivot_start_deg
         rebased = replace(
             original,
-            pivot_world=original.pivot_world + pivot_translation,
-            pivot_end_world=original.pivot_end_world + pivot_translation,
-            pivot_local=actual_pivot_local,
+            pivot_world=actual_pivot_world,
+            pivot_end_world=None,
+            pivot_local=actual_gripper_local,
             pivot_start_deg=original.pivot_start_deg + wrist_shift_deg,
             pivot_end_deg=original.pivot_end_deg + wrist_shift_deg,
         )
@@ -524,32 +564,229 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 ),
             )
         print(
-            "[접촉 피벗][삽입 후 실제 림 피벗 설정] "
+            "[접촉 피벗][실제 상부 접촉 패치 설정] "
+            f"{contact_source}, 접촉 {contact_count}개, "
             f"계획 대비 {np.linalg.norm(pivot_translation) * 1000:.1f} mm, "
             f"손목 {wrist_shift_deg:+.2f} deg 보정, "
             "그리퍼 로컬 접점 "
-            f"{np.round(actual_pivot_local * 1000, 1)} mm"
+            f"{np.round(actual_gripper_local * 1000, 1)} mm"
         )
 
-    def _recorded_inward_advance(self):
+    def _command_contact_following_pivot(self, stage):
+        """현재 그릇 접촉점을 따라가며 팔 전체의 피벗 자세를 명령한다."""
+        alpha = self.recorded_pivot_progress
+        smooth_alpha = alpha * alpha * (3.0 - 2.0 * alpha)
+        wrist_deg = self._lerp(
+            stage.pivot_start_deg, stage.pivot_end_deg, smooth_alpha
+        )
+        gripper_orientation = self._gripper_rotation(wrist_deg)
+
+        if self.recorded_upper_bowl_local is not None:
+            bowl_position, bowl_orientation = self._rigid_body_pose(
+                self.bowl_actor, 0
+            )
+            pivot_world = (
+                bowl_position
+                + bowl_orientation @ self.recorded_upper_bowl_local
+            )
+        else:
+            pivot_world = self._current_near_rim_world()
+
+        rolling_preload = (
+            self.PIVOT_ROLLING_PRELOAD_M * smooth_alpha
+        )
+        total_descent = (
+            rolling_preload + self.recorded_pivot_recovery_descent
+        )
+        world_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        gripper_position = (
+            pivot_world
+            - gripper_orientation @ self.recorded_upper_gripper_local
+            - world_up * total_descent
+        )
+        target_position, target_orientation = self._link6_pose(
+            gripper_position, gripper_orientation
+        )
+        self.command_position = np.asarray(target_position, dtype=np.float64)
+        self.command_orientation = np.asarray(
+            target_orientation, dtype=np.float64
+        )
+        target_joints, _, ik_error_mm = self.arm.solve_ik(
+            target_position,
+            target_R=target_orientation,
+            seed_6=self.arm._last_q,
+        )
+        if not np.all(np.isfinite(target_joints)) or ik_error_mm > 8.0:
+            self._fail(
+                f"'{stage.name}' 이동 중 IK 실패: "
+                f"위치 오차 {ik_error_mm:.2f} mm"
+            )
+            return
+        self.arm._last_q = target_joints.copy()
+        self.auto_control.command(
+            target_joints, settling=alpha >= 1.0
+        )
+
+    def _update_contact_following_pivot(self, stage):
+        """접촉을 폐루프로 유지하고 접촉 손실 중에는 회전을 정지한다."""
+        bowl_tilt_deg = self._recorded_bowl_tilt_deg()
+        if bowl_tilt_deg > self.MAX_LOCK_TILT_DEG:
+            self._print_grasp_diagnostics(stage)
+            self._fail(
+                "접촉점 피벗 회전 중 그릇 기울기가 "
+                f"{bowl_tilt_deg:.2f}도로 커졌습니다."
+            )
+            return
+
+        gripper_local, bowl_local, contact_count = (
+            self._upper_contact_manifold(
+                self.recorded_upper_gripper_local
+            )
+        )
+        if gripper_local is not None and bowl_local is not None:
+            filter_alpha = self.CONTACT_POINT_FILTER_ALPHA
+            self.recorded_upper_gripper_local = self._lerp(
+                self.recorded_upper_gripper_local,
+                gripper_local,
+                filter_alpha,
+            )
+            self.recorded_upper_bowl_local = self._lerp(
+                self.recorded_upper_bowl_local,
+                bowl_local,
+                filter_alpha,
+            )
+
+        if contact_count > 0:
+            self.recorded_pivot_contact_loss_time = 0.0
+            self.recorded_pivot_contact_stable_time += self.dt
+            if (
+                not self.recorded_pivot_contact_ready
+                and self.recorded_pivot_contact_stable_time
+                >= self.PIVOT_CONTACT_RECOVERY_HOLD_S
+            ):
+                self.recorded_pivot_contact_ready = True
+                print(
+                    "[접촉 피벗][재접촉] 상부 접촉이 "
+                    f"{self.recorded_pivot_contact_stable_time:.2f}s "
+                    "유지되어 회전을 재개합니다."
+                )
+        else:
+            self.recorded_pivot_contact_stable_time = 0.0
+            self.recorded_pivot_contact_loss_time += self.dt
+            if (
+                self.recorded_pivot_contact_ready
+                and self.recorded_pivot_contact_loss_time
+                >= self.PIVOT_CONTACT_LOSS_GRACE_S
+            ):
+                self.recorded_pivot_contact_ready = False
+                print(
+                    "[접촉 피벗][접촉 이탈] 회전을 일시 정지하고 "
+                    "수직 하강으로 상부 접촉을 복구합니다."
+                )
+            if not self.recorded_pivot_contact_ready:
+                self.recorded_pivot_recovery_descent = min(
+                    self.PIVOT_RECOVERY_MAX_DESCENT_M,
+                    self.recorded_pivot_recovery_descent
+                    + self.PIVOT_RECOVERY_DESCENT_SPEED_M_S * self.dt,
+                )
+
         if (
-            self.stage_start_gripper_position is None
-            or self.stage_start_bowl_position is None
+            self.recorded_pivot_contact_ready
+            and contact_count > 0
         ):
-            return 0.0
-        gripper_position, _ = self._rigid_body_pose(
+            self.recorded_pivot_progress = min(
+                1.0,
+                self.recorded_pivot_progress
+                + self.dt / self.PIVOT_DURATION_S,
+            )
+        self.recorded_pivot_wall_time += self.dt
+        self.stage_elapsed = (
+            self.recorded_pivot_progress * self.PIVOT_DURATION_S
+        )
+        self._command_contact_following_pivot(stage)
+        if self.finished:
+            return
+
+        report_second = int(self.recorded_pivot_wall_time)
+        if report_second > self.recorded_pivot_last_report_second:
+            self.recorded_pivot_last_report_second = report_second
+            commanded_descent = (
+                self.PIVOT_ROLLING_PRELOAD_M
+                * self.recorded_pivot_progress
+                + self.recorded_pivot_recovery_descent
+            )
+            print(
+                "[접촉 피벗][추종] "
+                f"회전 {self.recorded_pivot_progress * 100:.0f}%, "
+                f"상부 접촉 {contact_count}개, "
+                "수직 보정 "
+                f"{commanded_descent * 1000:.1f} mm"
+            )
+
+        if (
+            not self.recorded_pivot_contact_ready
+            and self.recorded_pivot_contact_loss_time
+            >= self.PIVOT_CONTACT_FAILURE_S
+            and self.recorded_pivot_recovery_descent
+            >= self.PIVOT_RECOVERY_MAX_DESCENT_M - 1.0e-9
+        ):
+            self._print_grasp_diagnostics(stage)
+            self._fail(
+                "상부 접촉이 끊긴 뒤 2mm 수직 하강 범위에서도 "
+                "재접촉하지 못했습니다."
+            )
+            return
+
+        if self.recorded_pivot_wall_time >= self.PIVOT_TOTAL_TIMEOUT_S:
+            self._print_grasp_diagnostics(stage)
+            self._fail(
+                "상부 접촉 유지 피벗이 10초 안에 잠금 조건을 "
+                "충족하지 못했습니다."
+            )
+            return
+
+        if (
+            self.recorded_pivot_progress >= 1.0
+            and contact_count > 0
+            and self._recorded_bowl_lift() >= self.MIN_LOCK_LIFT_M
+        ):
+            position_error, orientation_error = self._stage_error(stage)
+            print(
+                f"[자동][조건 충족] {stage.name}: "
+                f"상부 접촉 {contact_count}개를 유지하며 그릇 "
+                f"{self._recorded_bowl_lift() * 1000:.1f} mm 상승 "
+                "(실제 자세 오차: 위치 "
+                f"{position_error * 1000:.1f} mm, 자세 "
+                f"{orientation_error:.2f} deg)"
+            )
+            self._finish_stage(stage)
+
+    def _retarget_direct_lift_from_current(self):
+        """잠금 실제 자세에서 다른 동작 없이 월드 Z로 바로 상승한다."""
+        gripper_position, gripper_orientation = self._rigid_body_pose(
             self.arm.actor, self.gripper_body_index
         )
-        bowl_position = self._bowl_position()
-        relative_motion = (
-            gripper_position - self.stage_start_gripper_position
-            - (bowl_position - self.stage_start_bowl_position)
+        target_gripper_position = gripper_position + np.array(
+            [0.0, 0.0, self.DIRECT_LIFT_COMMAND_M], dtype=np.float64
         )
-        return float(
-            np.dot(
-                relative_motion,
-                self.bowl_frame[:, 0],
+        target_position, target_orientation = self._link6_pose(
+            target_gripper_position, gripper_orientation
+        )
+        lift_index = next(
+            index
+            for index in range(self.stage_index + 1, len(self.stages))
+            if self.stages[index].checkpoint == "recorded_final_lift"
+        )
+        for index in range(lift_index, len(self.stages)):
+            self.stages[index] = replace(
+                self.stages[index],
+                position=target_position.astype(np.float32),
+                orientation=target_orientation.astype(np.float64),
             )
+        print(
+            "[접촉 피벗][직접 상승 목표] 잠금 실제 자세에서 "
+            f"월드 Z축으로 {self.DIRECT_LIFT_COMMAND_M * 1000:.0f} mm "
+            "즉시 상승"
         )
 
     def _recorded_bowl_lift(self):
@@ -601,64 +838,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 "[접촉 피벗][상부 안착] "
                 f"접촉 {contact_count}개, 그릇 기울기 {bowl_tilt_deg:.2f} deg"
             )
-            self._retarget_recorded_insertion_from_contact()
-
-        if stage.checkpoint == "recorded_upper_insert":
-            contact_count = self._gripper_bowl_contact_count()
-            inward_advance = self._recorded_inward_advance()
-            bowl_tilt_deg = self._recorded_bowl_tilt_deg()
-            print(
-                "[접촉 피벗][상부 삽입 검사] "
-                f"그릇 대비 안쪽 이동 {inward_advance * 1000:.1f} mm, "
-                f"접촉 {contact_count}개, "
-                f"그릇 기울기 {bowl_tilt_deg:.2f} deg"
-            )
-            if inward_advance < self.MIN_UPPER_INSERT_M:
-                self._print_grasp_diagnostics(stage)
-                self._fail(
-                    "상부 고리가 그릇 대비 안쪽으로 "
-                    f"{self.MIN_UPPER_INSERT_M * 1000:.0f}mm 이상 들어가지 "
-                    "못해 수직 재접촉을 시작하지 않습니다."
-                )
-                return
-            if bowl_tilt_deg > self.MAX_PRELOCK_TILT_DEG:
-                self._print_grasp_diagnostics(stage)
-                self._fail(
-                    "상부 고리 삽입 중 그릇 기울기가 "
-                    f"{bowl_tilt_deg:.2f}도로 커졌습니다."
-                )
-                return
-            if contact_count <= 0:
-                print(
-                    "[접촉 피벗][상부 삽입] 수평 삽입으로 접촉이 "
-                    "분리되었습니다. 수직 재하강으로 다시 안착합니다."
-                )
-            self._retarget_recorded_reseat_from_insertion()
-            self.recorded_contact_time = 0.0
-
-        if stage.checkpoint == "recorded_upper_reseat":
-            contact_count = self._gripper_bowl_contact_count()
-            bowl_tilt_deg = self._recorded_bowl_tilt_deg()
-            if contact_count <= 0:
-                self._print_grasp_diagnostics(stage)
-                self._fail(
-                    f"{self.UPPER_RESEAT_MAX_DESCENT_M * 1000:.0f}mm "
-                    "수직 재하강 범위에서 상부 고리 접촉면과 "
-                    "그릇 림의 재접촉을 확인하지 못했습니다."
-                )
-                return
-            if bowl_tilt_deg > self.MAX_PRELOCK_TILT_DEG:
-                self._print_grasp_diagnostics(stage)
-                self._fail(
-                    "상부 수직 재접촉 중 그릇 기울기가 "
-                    f"{bowl_tilt_deg:.2f}도로 커졌습니다."
-                )
-                return
-            print(
-                "[접촉 피벗][상부 재안착] "
-                f"접촉 {contact_count}개, 그릇 기울기 {bowl_tilt_deg:.2f} deg"
-            )
-            self._retarget_recorded_preload_from_reseat()
+            self._retarget_recorded_preload_from_contact()
             self.recorded_contact_time = 0.0
 
         if stage.checkpoint == "recorded_upper_preload":
@@ -710,14 +890,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                     "미안착으로 판정합니다."
                 )
                 return
-            translation_mm, orientation_delta_deg = (
-                self._rebase_future_from_actual_stage(stage)
-            )
-            print(
-                "[접촉 피벗][잠금 재정렬] 실제 정지 자세 기준: "
-                f"위치 {translation_mm:.1f} mm, "
-                f"자세 {orientation_delta_deg:.2f} deg 보정"
-            )
+            self._retarget_direct_lift_from_current()
 
         if stage.checkpoint == "recorded_final_lift":
             if not self._validate_lift_follow(
