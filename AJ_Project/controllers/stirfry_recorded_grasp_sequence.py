@@ -11,7 +11,6 @@ from dataclasses import replace
 
 import numpy as np
 from isaacgym import gymapi
-from scipy.spatial.transform import Rotation
 
 from stirfry_auto_sequence import StirfryAutoSequence, _PoseStage
 
@@ -22,7 +21,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
     # 39-part 성공 TRACE에서 최초 안정 접촉 당시의 near rim을 그리퍼
     # 좌표로 역산한 값이다. 기존 CAD 천장점 [0.150, 0, 0.031]보다 실제
     # 접촉은 약 17 mm 안쪽, 13 mm 아래에서 형성됐다. 이 값은 최초 접촉
-    # 탐색에만 쓴다. 7 mm 추가 삽입하고 수직 재접촉한 뒤 실제 림 위치를
+    # 탐색에만 쓴다. 3 mm 추가 삽입하고 수직 재접촉한 뒤 실제 림 위치를
     # 그리퍼 로컬로 다시 투영해 연속 회전의 피벗점을 갱신한다.
     RECORDED_UPPER_CONTACT_LOCAL = np.array(
         [0.1334, 0.0, 0.0184], dtype=np.float64
@@ -39,21 +38,17 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
 
     PRECONTACT_CLEARANCE_M = 0.010
     CONTACT_SEEK_PENETRATION_M = 0.004
-    UPPER_INSERT_DEPTH_M = 0.007
-    MIN_UPPER_INSERT_M = 0.005
+    UPPER_INSERT_DEPTH_M = 0.003
+    MIN_UPPER_INSERT_M = 0.002
     UPPER_RESEAT_MAX_DESCENT_M = 0.012
     LOCK_PIVOT_RISE_M = 0.045
-    TEST_LIFT_M = 0.040
-    TRANSFER_X_M = 0.050
-    FINAL_LIFT_COMMAND_M = 0.100
+    DIRECT_LIFT_COMMAND_M = 0.140
 
     MIN_LOCK_LIFT_M = 0.015
     MIN_FINAL_LIFT_M = 0.150
     MAX_PRELOCK_TILT_DEG = 8.0
     MAX_LOCK_TILT_DEG = 15.0
     CONTACT_CONFIRM_S = 0.05
-    TRANSFER_MAX_RELATIVE_POSITION_DRIFT_M = 0.015
-    TRANSFER_MAX_RELATIVE_ORIENTATION_DRIFT_DEG = 8.0
 
     def __init__(
         self,
@@ -196,12 +191,8 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             orientation_tolerance_deg=5.0,
         )
 
-        test_lift_position = locked_position + up * self.TEST_LIFT_M
-        transfer_position = test_lift_position + np.array(
-            [self.TRANSFER_X_M, 0.0, 0.0], dtype=np.float64
-        )
-        final_position = (
-            transfer_position + up * self.FINAL_LIFT_COMMAND_M
+        lifted_position = (
+            locked_position + up * self.DIRECT_LIFT_COMMAND_M
         )
 
         stages.extend(
@@ -222,7 +213,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                     orientation_tolerance_deg=0.8,
                 ),
                 pose_stage(
-                    "상부 고리를 그릇 안쪽으로 7mm 삽입",
+                    "상부 고리를 그릇 안쪽으로 3mm 삽입",
                     1.2,
                     inserted_position,
                     inserted_R,
@@ -241,27 +232,9 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 ),
                 pivot_stage,
                 pose_stage(
-                    "파지 검증용 40mm 시험 상승",
-                    1.5,
-                    test_lift_position,
-                    locked_link_R,
-                    checkpoint="recorded_test_lift",
-                    position_tolerance=0.008,
-                    orientation_tolerance_deg=2.0,
-                ),
-                pose_stage(
-                    "파지 유지 상태로 X축 50mm 이동",
-                    1.5,
-                    transfer_position,
-                    locked_link_R,
-                    checkpoint="recorded_transfer",
-                    position_tolerance=0.008,
-                    orientation_tolerance_deg=2.0,
-                ),
-                pose_stage(
-                    "그릇 100mm 최종 상승",
-                    2.0,
-                    final_position,
+                    "잠금 성공 뒤 그릇 140mm 즉시 수직 상승",
+                    3.0,
+                    lifted_position,
                     locked_link_R,
                     checkpoint="recorded_final_lift",
                     position_tolerance=0.008,
@@ -270,7 +243,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 pose_stage(
                     "접촉 피벗 자동 파지 완료 자세 유지",
                     0.5,
-                    final_position,
+                    lifted_position,
                     locked_link_R,
                     checkpoint="recorded_complete",
                     position_tolerance=0.008,
@@ -637,19 +610,9 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 f"자세 {orientation_delta_deg:.2f} deg 보정"
             )
 
-        if stage.checkpoint == "recorded_test_lift":
-            if not self._validate_lift_follow(
-                stage, "40mm 시험 상승", self.TEST_LIFT_M
-            ):
-                return
-
-        if stage.checkpoint == "recorded_transfer":
-            if not self._validate_transfer_retention(stage):
-                return
-
         if stage.checkpoint == "recorded_final_lift":
             if not self._validate_lift_follow(
-                stage, "100mm 최종 상승", self.FINAL_LIFT_COMMAND_M
+                stage, "140mm 직접 수직 상승", self.DIRECT_LIFT_COMMAND_M
             ):
                 return
 
@@ -682,44 +645,3 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                 "  그릇 초기 대비 기울기 = "
                 f"{self._recorded_bowl_tilt_deg():.2f} deg"
             )
-
-    def _validate_transfer_retention(self, stage):
-        """수평 이동 중 bowl/gripper 상대 자세가 유지됐는지 검사한다."""
-        bowl_position, bowl_orientation = self._rigid_body_pose(
-            self.bowl_actor, 0
-        )
-        gripper_position, gripper_orientation = self._rigid_body_pose(
-            self.arm.actor, self.gripper_body_index
-        )
-        bowl_in_gripper = gripper_orientation.T @ (
-            bowl_position - gripper_position
-        )
-        relative_position_drift = float(
-            np.linalg.norm(bowl_in_gripper - self.stage_start_bowl_in_gripper)
-        )
-        bowl_orientation_in_gripper = gripper_orientation.T @ bowl_orientation
-        relative_orientation_drift = float(
-            np.degrees(
-                Rotation.from_matrix(
-                    bowl_orientation_in_gripper
-                    @ self.stage_start_bowl_orientation_in_gripper.T
-                ).magnitude()
-            )
-        )
-        print(
-            "[접촉 피벗][수평 이동 추종 검사] "
-            f"상대 위치 변화 {relative_position_drift * 1000:.1f} mm, "
-            f"상대 자세 변화 {relative_orientation_drift:.2f} deg"
-        )
-        if (
-            relative_position_drift
-            > self.TRANSFER_MAX_RELATIVE_POSITION_DRIFT_M
-            or relative_orientation_drift
-            > self.TRANSFER_MAX_RELATIVE_ORIENTATION_DRIFT_DEG
-        ):
-            self._print_grasp_diagnostics(stage)
-            self._fail(
-                "수평 이동 중 그릇과 그리퍼의 상대 자세가 크게 변했습니다."
-            )
-            return False
-        return True
