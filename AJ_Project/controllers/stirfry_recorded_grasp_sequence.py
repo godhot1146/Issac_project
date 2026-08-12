@@ -44,6 +44,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
     PIVOT_CONTACT_RECOVERY_HOLD_S = 0.10
     PIVOT_CONTACT_FAILURE_S = 1.50
     PIVOT_TOTAL_TIMEOUT_S = 14.0
+    PIVOT_LOCK_COMMIT_PROGRESS = 0.50
     UPPER_CONTACT_TRACK_RADIUS_M = 0.025
     UPPER_CONTACT_CAPTURE_CLUSTER_M = 0.006
     PIVOT_CARTESIAN_CORRECTION_MAX_M = 0.012
@@ -78,6 +79,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         self.recorded_pivot_contact_loss_time = 0.0
         self.recorded_pivot_contact_stable_time = 0.0
         self.recorded_pivot_contact_ready = True
+        self.recorded_pivot_lock_committed = False
         self.recorded_pivot_recovery_descent = 0.0
         self.recorded_pivot_cartesian_correction = np.zeros(
             3, dtype=np.float64
@@ -307,6 +309,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             self.recorded_pivot_contact_loss_time = 0.0
             self.recorded_pivot_contact_stable_time = 0.0
             self.recorded_pivot_contact_ready = True
+            self.recorded_pivot_lock_committed = False
             self.recorded_pivot_recovery_descent = 0.0
             self.recorded_pivot_cartesian_correction[:] = 0.0
             self.recorded_pivot_anchor_gap[:] = 0.0
@@ -710,7 +713,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         )
 
     def _update_contact_following_pivot(self, stage):
-        """접촉을 폐루프로 유지하고 접촉 손실 중에는 회전을 정지한다."""
+        """전반은 상부 접촉을 복구하고 후반은 하부 잠금까지 커밋한다."""
         bowl_tilt_deg = self._recorded_bowl_tilt_deg()
         if bowl_tilt_deg > self.MAX_LOCK_TILT_DEG:
             self._print_grasp_diagnostics(stage)
@@ -728,7 +731,33 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         raw_contact_count = self._gripper_bowl_contact_count()
         self._update_pivot_anchor_correction()
 
-        if contact_count > 0:
+        if (
+            not self.recorded_pivot_lock_committed
+            and self.recorded_pivot_progress
+            >= self.PIVOT_LOCK_COMMIT_PROGRESS
+        ):
+            self.recorded_pivot_lock_committed = True
+            self.recorded_pivot_contact_ready = True
+            self.recorded_pivot_contact_loss_time = 0.0
+            print(
+                "[접촉 피벗][잠금 커밋] 회전 "
+                f"{self.recorded_pivot_progress * 100:.0f}%부터는 "
+                "상부 접촉이 하부 훅 접촉으로 전환되어도 멈추지 않고 "
+                "최종 잠금 자세까지 회전합니다."
+            )
+
+        if self.recorded_pivot_lock_committed:
+            # 성공 기록에서도 회전 후반에는 상부 접촉 패치가 하부 훅과
+            # 옆면 접촉으로 전환된다. 이 구간은 상부 필터가 0이어도
+            # 실패가 아니며, 남은 회전을 끝내야 실제 잠금이 형성된다.
+            self.recorded_pivot_contact_ready = True
+            if contact_count == 0:
+                self.recorded_pivot_recovery_descent = min(
+                    self.PIVOT_RECOVERY_MAX_DESCENT_M,
+                    self.recorded_pivot_recovery_descent
+                    + self.PIVOT_RECOVERY_DESCENT_SPEED_M_S * self.dt,
+                )
+        elif contact_count > 0:
             self.recorded_pivot_contact_loss_time = 0.0
             self.recorded_pivot_contact_stable_time += self.dt
             if (
@@ -762,9 +791,8 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                     + self.PIVOT_RECOVERY_DESCENT_SPEED_M_S * self.dt,
                 )
 
-        if (
-            self.recorded_pivot_contact_ready
-            and contact_count > 0
+        if self.recorded_pivot_lock_committed or (
+            self.recorded_pivot_contact_ready and contact_count > 0
         ):
             self.recorded_pivot_progress = min(
                 1.0,
@@ -800,7 +828,8 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             )
 
         if (
-            not self.recorded_pivot_contact_ready
+            not self.recorded_pivot_lock_committed
+            and not self.recorded_pivot_contact_ready
             and self.recorded_pivot_contact_loss_time
             >= self.PIVOT_CONTACT_FAILURE_S
             and self.recorded_pivot_recovery_descent
@@ -817,7 +846,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         if self.recorded_pivot_wall_time >= self.PIVOT_TOTAL_TIMEOUT_S:
             self._print_grasp_diagnostics(stage)
             self._fail(
-                "상부 접촉 유지 피벗이 "
+                "접촉 피벗 잠금이 "
                 f"{self.PIVOT_TOTAL_TIMEOUT_S:.0f}초 안에 잠금 조건을 "
                 "충족하지 못했습니다."
             )
@@ -825,13 +854,13 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
 
         if (
             self.recorded_pivot_progress >= 1.0
-            and contact_count > 0
+            and raw_contact_count > 0
             and self._recorded_bowl_lift() >= self.MIN_LOCK_LIFT_M
         ):
             position_error, orientation_error = self._stage_error(stage)
             print(
                 f"[자동][조건 충족] {stage.name}: "
-                f"상부 접촉 {contact_count}개를 유지하며 그릇 "
+                f"최종 그리퍼-그릇 접촉 {raw_contact_count}개로 그릇 "
                 f"{self._recorded_bowl_lift() * 1000:.1f} mm 상승 "
                 "(실제 자세 오차: 위치 "
                 f"{position_error * 1000:.1f} mm, 자세 "
