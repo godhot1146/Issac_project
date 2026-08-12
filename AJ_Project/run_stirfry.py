@@ -274,6 +274,8 @@ gym.viewer_camera_look_at(
 )
 
 from doosan_arm_keyboard_teleop import DoosanArmKeyboardTeleop
+from stirfry_arm_keyboard_teleop import StirfryArmKeyboardTeleop
+from stirfry_teleop_recorder import StirfryTeleopRecorder
 
 # --auto는 접촉 직전의 안전 위치까지만 자동 이동한다. 파지·상승·붓기는
 # 실행하지 않고, 도착한 현재 자세를 그대로 TSC 키보드 조작기에 넘긴다.
@@ -292,19 +294,22 @@ if args.auto:
         manual_handoff=True,
     )
     teleop = None
+    teleop_recorder = None
 else:
     # 키보드 텔레오프 (JSC/TSC/OSC, 꾹 누르면 연속, TSC 자세 유지)
     # 구현: controllers/doosan_arm_keyboard_teleop.py
     teleop = DoosanArmKeyboardTeleop(gym, viewer, arm, base_z=BASE_Z)
     auto_sequence = None
+    teleop_recorder = None
 
 while not gym.query_viewer_has_closed(viewer):
+    success_requested = False
     if auto_sequence is not None:
         auto_sequence.update()
         if auto_sequence.handoff_ready:
             # 일반 수동 모드의 4 mm/프레임보다 느린 1 mm/프레임과
             # 0.5 deg/프레임을 사용해 림 주변 접촉을 미세 조정한다.
-            teleop = DoosanArmKeyboardTeleop(
+            teleop = StirfryArmKeyboardTeleop(
                 gym,
                 viewer,
                 arm,
@@ -316,20 +321,38 @@ while not gym.query_viewer_has_closed(viewer):
                 home_on_start=False,
             )
             auto_sequence = None
+            teleop_recorder = StirfryTeleopRecorder(
+                gym,
+                env,
+                arm,
+                cook_bowl_handle,
+                teleop,
+                dt=sp.dt,
+                gripper_body_name=GRIPPER_BODY_NAME,
+            )
             print("""
 ===== 자동 접근 -> 키보드 미세조작 전환 완료 =====
  1) 2번: TSC 재동기화(권장)
  2) W/S: X±, A/D: Y±, Q/E: Z± (1 mm/프레임)
  3) T/G: pitch±, F/H: roll±, C/V: yaw± (0.5 deg/프레임)
  4) 필요하면 1번 JSC -> J/L 관절 선택 -> U/O 미세 회전
+ 5) 그릇을 들었으면 ENTER: 성공 표시 + 분석용 로그 출력
  주의: R은 홈 복귀이므로 파지 중에는 누르지 마세요.
 ==================================================""")
     else:
         teleop.handle_and_apply()   # 이벤트 처리 + 연속동작 + 모드별 제어
+        if teleop_recorder is not None:
+            success_requested = teleop.consume_success_marker()
 
     gym.simulate(sim); gym.fetch_results(sim, True)
+    if teleop_recorder is not None and teleop_recorder.active:
+        teleop_recorder.record()
+        if success_requested:
+            teleop_recorder.finish("user_marked_success")
     gym.step_graphics(sim); gym.draw_viewer(viewer, sim, True); gym.sync_frame_time(sim)
 
+if teleop_recorder is not None and teleop_recorder.active:
+    teleop_recorder.finish("viewer_closed_without_success_marker")
 gym.destroy_viewer(viewer)
 gym.destroy_sim(sim)
 print("종료.")
