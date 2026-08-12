@@ -62,7 +62,6 @@ class StirfryAutoSequence:
     VERTICAL_STAGING_CLEARANCE = 0.18
     UPPER_PRECONTACT_CLEARANCE = 0.04
     UPPER_INSERT_CLEARANCE = 0.010
-    MANUAL_HANDOFF_CLEARANCE = 0.030
     UPPER_CENTER_DESCENT = 0.007326201
     UPPER_CONTACT_MAX_DESCENT = 0.050
     DIAGONAL_SEAT_CYCLES = 3
@@ -379,10 +378,6 @@ class StirfryAutoSequence:
             entry_origin
             + self.bowl_frame[:, 2] * self.UPPER_INSERT_CLEARANCE
         )
-        manual_handoff_origin = (
-            entry_origin
-            + self.bowl_frame[:, 2] * self.MANUAL_HANDOFF_CLEARANCE
-        )
         centered_origin = (
             outer_rim_world
             - open_R @ self.UPPER_MOUTH_CENTER_LOCAL
@@ -466,11 +461,16 @@ class StirfryAutoSequence:
 
         stages = [
             stage(
-                "그릇 위 수직 파지 대기(elbow-up)",
+                (
+                    "그릇 림 접촉 기준보다 180mm 위 수동 인계 대기"
+                    if self.manual_handoff
+                    else "그릇 위 수직 파지 대기(elbow-up)"
+                ),
                 4.0,
                 staging_origin,
                 entry_R,
                 joint_target=staging_q,
+                checkpoint=("manual_handoff" if self.manual_handoff else ""),
             ),
             stage(
                 "두꺼운 상부 고리 위로 수직 하강",
@@ -479,17 +479,10 @@ class StirfryAutoSequence:
                 entry_R,
             ),
             stage(
-                (
-                    "두꺼운 상부 고리를 림보다 30mm 위 안전거리로 하강"
-                    if self.manual_handoff
-                    else "두꺼운 상부 고리를 림보다 10mm 위로 하강"
-                ),
+                "두꺼운 상부 고리를 림보다 10mm 위로 하강",
                 2.0,
-                manual_handoff_origin if self.manual_handoff else open_origin,
+                open_origin,
                 entry_R,
-                checkpoint=(
-                    "manual_handoff" if self.manual_handoff else ""
-                ),
             ),
             stage(
                 "잠금 반대 회전으로 상부 고리 입구 열기",
@@ -671,7 +664,7 @@ class StirfryAutoSequence:
             ]
         )
         if self.manual_handoff:
-            return stages[:3]
+            return stages[:1]
         return stages
 
     def _gripper_rotation(self, wrist_deg):
@@ -778,7 +771,8 @@ class StirfryAutoSequence:
             self.handoff_ready = True
             self.finished = True
             print(
-                "[자동 접근 완료] 그리퍼가 림보다 30mm 위 안전 위치에 "
+                "[자동 접근 완료] 그리퍼가 림 접촉 기준보다 180mm 위 "
+                "안전 대기점에 "
                 "도착했습니다. 키보드 TSC 미세조작으로 전환합니다."
             )
             return

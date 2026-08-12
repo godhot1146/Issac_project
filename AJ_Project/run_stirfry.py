@@ -4,7 +4,7 @@ run_stirfry.py — 두산 A0509 볶음 공정 씬 + 수동/자동 제어
 씬: 볶음 도면을 기준으로 Bonitkit + V2 조리/준비 테이블 + 그릇 11개를
     A0509 작업 반경 안에 배치한다. A0509는 전용 stand 상단 z=0.81에 고정 장착한다.
 제어: 기본은 실행 중 키로 모드를 바꿔가며 직접 조작한다.
-      --auto를 주면 그리퍼를 조리 그릇 림보다 30 mm 위까지 자동으로
+      --auto를 주면 그리퍼를 조리 그릇 림 접촉 기준보다 180 mm 위까지
       이동한 뒤, 현재 자세를 유지한 채 키보드 미세조작으로 전환한다.
 
   ┌─────────────── 키 맵 ───────────────┐
@@ -277,8 +277,8 @@ from doosan_arm_keyboard_teleop import DoosanArmKeyboardTeleop
 from stirfry_arm_keyboard_teleop import StirfryArmKeyboardTeleop
 from stirfry_teleop_recorder import StirfryTeleopRecorder
 
-# --auto는 림보다 30 mm 위의 안전 위치까지만 자동 이동한다. 파지·상승·붓기는
-# 실행하지 않고, 도착한 현재 자세를 그대로 TSC 키보드 조작기에 넘긴다.
+# --auto는 림 접촉 기준보다 180 mm 위의 안전 위치까지만 자동 이동한다.
+# 파지·상승·붓기는 실행하지 않고, 현재 자세를 TSC 키보드 조작기에 넘긴다.
 if args.auto:
     from stirfry_auto_sequence import StirfryAutoSequence
 
@@ -307,6 +307,7 @@ while not gym.query_viewer_has_closed(viewer):
     if auto_sequence is not None:
         auto_sequence.update()
         if auto_sequence.handoff_ready:
+            gravity_control = auto_sequence.auto_control
             # 일반 수동 모드의 4 mm/프레임보다 느린 1 mm/프레임과
             # 0.5 deg/프레임을 사용해 림 주변 접촉을 미세 조정한다.
             teleop = StirfryArmKeyboardTeleop(
@@ -319,6 +320,7 @@ while not gym.query_viewer_has_closed(viewer):
                 ori_step_deg=0.5,
                 settle=0,
                 home_on_start=False,
+                gravity_control=gravity_control,
             )
             auto_sequence = None
             teleop_recorder = StirfryTeleopRecorder(
@@ -337,6 +339,7 @@ while not gym.query_viewer_has_closed(viewer):
  3) T/G: pitch±, F/H: roll±, C/V: yaw± (0.5 deg/프레임)
  4) 필요하면 1번 JSC -> J/L 관절 선택 -> U/O 미세 회전
  5) 그릇을 들었으면 ENTER: 성공 표시 + 분석용 로그 출력
+ 6) 3번 OSC는 안전을 위해 비활성화
  주의: R은 홈 복귀이므로 파지 중에는 누르지 마세요.
 ==================================================""")
     else:
