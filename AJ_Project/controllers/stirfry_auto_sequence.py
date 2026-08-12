@@ -256,6 +256,17 @@ class StirfryAutoSequence:
             if stage.orientation_tolerance_deg is None
             else float(stage.orientation_tolerance_deg)
         )
+        completion_override = self._stage_completion_override(
+            stage, position_error, orientation_error
+        )
+        if completion_override is not None:
+            print(
+                f"[자동][조건 충족] {stage.name}: {completion_override} "
+                f"(실제 자세 오차: 위치 {position_error * 1000:.1f} mm, "
+                f"자세 {orientation_error:.2f} deg)"
+            )
+            self._finish_stage(stage)
+            return
         if (
             position_error <= position_tolerance
             and orientation_error <= orientation_tolerance
@@ -304,6 +315,17 @@ class StirfryAutoSequence:
                 f"'{stage.name}' 실제 목표 미도착: 위치 {position_error * 1000:.1f} mm, "
                 f"자세 {orientation_error:.2f} deg"
             )
+
+    def _stage_completion_override(
+        self, stage, position_error, orientation_error
+    ):
+        """물리적 작업 결과로 자세 도착 조건을 대체할 확장 지점.
+
+        기본 자동 시퀀스는 항상 실제 link_6 자세 도착을 요구한다. 접촉으로
+        목표 자세에 도달할 수 없어도 작업 결과를 직접 검증할 수 있는 파생
+        시퀀스만 이 메서드를 재정의한다.
+        """
+        return None
 
     def _command_stage(self, stage, alpha):
         settling = self.stage_elapsed + 1.0e-9 >= stage.duration_s

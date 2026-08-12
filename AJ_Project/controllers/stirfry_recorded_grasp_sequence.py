@@ -59,6 +59,13 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
     TRANSFER_MAX_RELATIVE_POSITION_DRIFT_M = 0.015
     TRANSFER_MAX_RELATIVE_ORIENTATION_DRIFT_DEG = 8.0
 
+    # 고리 끝을 완전히 고정한 채 66.5도를 회전하면 손목이 약 160 mm
+    # 아래로 원호 이동해 테이블과 충돌할 수 있다. 성공 기록의 궤적은
+    # 유지하되, 한쪽 고리만 걸려 있는 회전 중간에만 접촉점 중심 원호를
+    # 일부 혼합한다. 시작/끝에서는 보상이 0이므로 기록된 최종 파지
+    # 자세와 뒤 웨이포인트는 바뀌지 않는다.
+    LOCK_PIVOT_COMPENSATION = 0.35
+
     def __init__(
         self,
         gym,
@@ -71,6 +78,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         slot_direction_xy=(-1.0, 0.0),
     ):
         self.recorded_initial_bowl_position = None
+        self.recorded_lock_pivot_world = None
         super().__init__(
             gym,
             sim,
@@ -87,6 +95,11 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         print(
             "[기록 기반 자동 파지] 안전 접근 뒤 성공 TRACE의 압축 경로로 "
             "그릇 파지와 상승을 실행합니다."
+        )
+        print(
+            "[기록 기반 자동 파지] 잠금 회전 중 고리 접촉점 원호 보상 "
+            f"최대 {self.LOCK_PIVOT_COMPENSATION * 100:.0f}%를 적용해 "
+            "그릇 기울어짐을 줄입니다."
         )
 
     @staticmethod
@@ -215,6 +228,100 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
         )
         return stages
 
+    def _enter_stage(self, index):
+        super()._enter_stage(index)
+        stage = self.stages[index]
+        if stage.checkpoint != "recorded_lock":
+            return
+
+        # 계획 좌표가 아니라 실제 초기 접촉 자세에서 고리 피벗을 잡는다.
+        # 앞 단계의 수 mm 정착 오차가 원호 보상에 누적되는 것을 막는다.
+        gripper_position, gripper_orientation = self._rigid_body_pose(
+            self.arm.actor, self.gripper_body_index
+        )
+        self.recorded_lock_pivot_world = (
+            gripper_position
+            + gripper_orientation @ self.UPPER_HOOK_SEAT_LOCAL
+        )
+        print(
+            "[기록 기반 자동 파지][기울어짐 억제] 실제 고리 접촉점을 "
+            "기준으로 잠금 원호 보상을 시작합니다."
+        )
+
+    def _command_stage(self, stage, alpha):
+        if (
+            stage.checkpoint != "recorded_lock"
+            or self.recorded_lock_pivot_world is None
+        ):
+            super()._command_stage(stage, alpha)
+            return
+
+        # 기록 경로의 고정 link_6 위치와, 고리 접촉점을 완전히 고정하는
+        # 원호 위치를 혼합한다. 4a(1-a) 창을 사용해 회전 중간에만 보상하고
+        # 양쪽 고리가 잠기는 마지막에는 원래 성공 경로로 자연스럽게
+        # 돌아온다.
+        target_orientation = self._slerp_matrix(
+            self.stage_start_orientation, stage.orientation, alpha
+        )
+        recorded_position = self._lerp(
+            self.stage_start_position, stage.position, alpha
+        )
+        gripper_orientation = (
+            target_orientation @ self.LINK6_TO_GRIPPER_ROTATION
+        )
+        pivot_gripper_position = (
+            self.recorded_lock_pivot_world
+            - gripper_orientation @ self.UPPER_HOOK_SEAT_LOCAL
+        )
+        pivot_position, _ = self._link6_pose(
+            pivot_gripper_position, gripper_orientation
+        )
+        window = 4.0 * alpha * (1.0 - alpha)
+        blend = self.LOCK_PIVOT_COMPENSATION * window
+        target_position = self._lerp(
+            recorded_position, pivot_position, blend
+        )
+
+        self.command_position = np.asarray(target_position, dtype=np.float64)
+        self.command_orientation = np.asarray(
+            target_orientation, dtype=np.float64
+        )
+        target_joints, _, ik_error_mm = self.arm.solve_ik(
+            target_position,
+            target_R=target_orientation,
+            seed_6=self.arm._last_q,
+        )
+        if not np.all(np.isfinite(target_joints)) or ik_error_mm > 8.0:
+            self._fail(
+                f"'{stage.name}' 고리 피벗 보상 중 IK 실패: "
+                f"위치 오차 {ik_error_mm:.2f} mm"
+            )
+            return
+        self.arm._last_q = target_joints.copy()
+        settling = self.stage_elapsed + 1.0e-9 >= stage.duration_s
+        self.auto_control.command(target_joints, settling=settling)
+
+    def _stage_completion_override(
+        self, stage, position_error, orientation_error
+    ):
+        if stage.checkpoint != "recorded_lock":
+            return None
+        bowl_lift = self._recorded_bowl_lift()
+        if bowl_lift < self.MIN_LOCK_LIFT_M:
+            return None
+        return (
+            f"그릇이 {bowl_lift * 1000:.1f} mm 실제 상승해 "
+            "파지 성공으로 판정"
+        )
+
+    def _recorded_bowl_lift(self):
+        if self.recorded_initial_bowl_position is None:
+            return 0.0
+        return float(
+            self._bowl_position()[2]
+            - self.recorded_initial_bowl_position[2]
+        )
+
     def _finish_stage(self, stage):
         if stage.checkpoint == "manual_handoff":
             # 기존 --auto는 여기서 키보드로 넘기지만 --auto-grasp는 같은
@@ -229,10 +336,7 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             return
 
         if stage.checkpoint == "recorded_lock":
-            bowl_position = self._bowl_position()
-            bowl_lift = float(
-                bowl_position[2] - self.recorded_initial_bowl_position[2]
-            )
+            bowl_lift = self._recorded_bowl_lift()
             print(
                 "[기록 기반 자동 파지][잠금 검사] "
                 f"그릇 상승량 {bowl_lift * 1000:.1f} mm"
@@ -244,6 +348,19 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
                     "수평 이동을 시작하지 않습니다."
                 )
                 return
+
+            # 물리 접촉 때문에 기록 목표와 다른 자세에서 멈춘 경우 그
+            # 실제 성공 자세를 다음 안정화·수평 이동·상승 단계의 원점으로
+            # 사용한다. 이후에 다시 기록 목표로 당기면서 파지를 놓치는
+            # 현상을 막는다.
+            translation_mm, orientation_delta_deg = (
+                self._rebase_future_from_actual_stage(stage)
+            )
+            print(
+                "[기록 기반 자동 파지][잠금 재정렬] 실제 파지 자세 기준: "
+                f"위치 {translation_mm:.1f} mm, "
+                f"자세 {orientation_delta_deg:.2f} deg 보정"
+            )
 
         if stage.checkpoint == "recorded_transfer":
             if not self._validate_transfer_retention(stage):
@@ -277,6 +394,14 @@ class StirfryRecordedGraspSequence(StirfryAutoSequence):
             return
 
         super()._finish_stage(stage)
+
+    def _print_pose_diagnostics(self, stage):
+        super()._print_pose_diagnostics(stage)
+        if self.recorded_initial_bowl_position is not None:
+            print(
+                "  그릇 총 상승량 = "
+                f"{self._recorded_bowl_lift() * 1000:.1f} mm"
+            )
 
     def _validate_transfer_retention(self, stage):
         """수평 이동 중 bowl/gripper 상대 자세가 유지됐는지 검사한다."""
