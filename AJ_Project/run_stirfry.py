@@ -6,8 +6,8 @@ run_stirfry.py — 두산 A0509 볶음 공정 씬 + 수동/자동 제어
 제어: 기본은 실행 중 키로 모드를 바꿔가며 직접 조작한다.
       --auto를 주면 그리퍼를 조리 그릇 림 접촉 기준보다 180 mm 위까지
       이동한 뒤, 현재 자세를 유지한 채 키보드 미세조작으로 전환한다.
-      --auto-grasp를 주면 같은 안전 접근 뒤 기록 기반 자동 파지·상승을
-      실행한다.
+      --auto-grasp를 주면 같은 안전 접근 뒤 상부 고리 접촉점을 축으로
+      팔 전체를 연속 이동해 자동 파지·상승한다.
 
   ┌─────────────── 키 맵 ───────────────┐
   │ [모드]  1: JSC(관절)  2: TSC(좌표+IK)  3: OSC(좌표+동역학)
@@ -23,7 +23,7 @@ controllers/doosan_arm_keyboard_teleop.py에 분리되어 있다.
 
 실행:  conda activate issac_env  &&  python run_stirfry.py
        python run_stirfry.py --auto   # 자동 접근 -> 키보드 미세조작
-       python run_stirfry.py --auto-grasp  # 기록 기반 자동 파지 -> 상승
+       python run_stirfry.py --auto-grasp  # 접촉점 피벗 자동 파지 -> 상승
        (OSC용 gymtorch→ninja 필요)
 """
 import os
@@ -137,7 +137,7 @@ args = gymutil.parse_arguments(
         {
             "name": "--auto-grasp",
             "action": "store_true",
-            "help": "성공 기록에서 추출한 자동 그릇 파지·상승을 실행한다.",
+            "help": "상부 고리 접촉점 피벗 방식의 자동 그릇 파지·상승을 실행한다.",
         }
     ],
 )

@@ -29,9 +29,11 @@ class _PoseStage:
     joint_target: object = None
     checkpoint: str = ""
     pivot_world: object = None
+    pivot_end_world: object = None
     pivot_local: object = None
     pivot_start_deg: object = None
     pivot_end_deg: object = None
+    pivot_motion_start: float = 0.0
     contact_seek: bool = False
     position_tolerance: object = None
     orientation_tolerance_deg: object = None
@@ -700,9 +702,22 @@ class StirfryAutoSequence:
             stage.pivot_start_deg, stage.pivot_end_deg, alpha
         )
         gripper_rotation = self._gripper_rotation(wrist_deg)
+        pivot_world = stage.pivot_world
+        if stage.pivot_end_world is not None:
+            motion_start = float(stage.pivot_motion_start)
+            pivot_alpha = np.clip(
+                (alpha - motion_start) / max(1.0 - motion_start, 1.0e-6),
+                0.0,
+                1.0,
+            )
+            pivot_alpha = pivot_alpha * pivot_alpha * (
+                3.0 - 2.0 * pivot_alpha
+            )
+            pivot_world = self._lerp(
+                stage.pivot_world, stage.pivot_end_world, pivot_alpha
+            )
         gripper_position = (
-            stage.pivot_world
-            - gripper_rotation @ stage.pivot_local
+            pivot_world - gripper_rotation @ stage.pivot_local
         )
         return self._link6_pose(gripper_position, gripper_rotation)
 
@@ -878,12 +893,16 @@ class StirfryAutoSequence:
         for index in range(self.stage_index + 1, len(self.stages)):
             original = self.stages[index]
             pivot_world = original.pivot_world
+            pivot_end_world = original.pivot_end_world
             if pivot_world is not None:
                 pivot_world = pivot_world + translation
+            if pivot_end_world is not None:
+                pivot_end_world = pivot_end_world + translation
             self.stages[index] = replace(
                 original,
                 position=(original.position + translation).astype(np.float32),
                 pivot_world=pivot_world,
+                pivot_end_world=pivot_end_world,
             )
 
         actual_link_position_world, _ = self._rigid_body_pose(
@@ -1013,12 +1032,15 @@ class StirfryAutoSequence:
         for index in range(self.stage_index + 1, len(self.stages)):
             original = self.stages[index]
             pivot_world = original.pivot_world
+            pivot_end_world = original.pivot_end_world
             pivot_start_deg = original.pivot_start_deg
             pivot_end_deg = original.pivot_end_deg
             if pivot_world is not None:
                 pivot_world = pivot_world + pivot_translation
                 pivot_start_deg = pivot_start_deg + pivot_angle_shift
                 pivot_end_deg = pivot_end_deg + pivot_angle_shift
+            if pivot_end_world is not None:
+                pivot_end_world = pivot_end_world + pivot_translation
             rebased = replace(
                 original,
                 position=(original.position + translation).astype(np.float32),
@@ -1026,6 +1048,7 @@ class StirfryAutoSequence:
                     np.float64
                 ),
                 pivot_world=pivot_world,
+                pivot_end_world=pivot_end_world,
                 pivot_start_deg=pivot_start_deg,
                 pivot_end_deg=pivot_end_deg,
             )
