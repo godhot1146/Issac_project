@@ -6,6 +6,8 @@ run_stirfry.py — 두산 A0509 볶음 공정 씬 + 수동/자동 제어
 제어: 기본은 실행 중 키로 모드를 바꿔가며 직접 조작한다.
       --auto를 주면 그리퍼를 조리 그릇 림 접촉 기준보다 180 mm 위까지
       이동한 뒤, 현재 자세를 유지한 채 키보드 미세조작으로 전환한다.
+      --auto-grasp를 주면 같은 안전 접근 뒤 기록 기반 자동 파지·상승을
+      실행한다.
 
   ┌─────────────── 키 맵 ───────────────┐
   │ [모드]  1: JSC(관절)  2: TSC(좌표+IK)  3: OSC(좌표+동역학)
@@ -21,6 +23,7 @@ controllers/doosan_arm_keyboard_teleop.py에 분리되어 있다.
 
 실행:  conda activate issac_env  &&  python run_stirfry.py
        python run_stirfry.py --auto   # 자동 접근 -> 키보드 미세조작
+       python run_stirfry.py --auto-grasp  # 기록 기반 자동 파지 -> 상승
        (OSC용 gymtorch→ninja 필요)
 """
 import os
@@ -130,9 +133,16 @@ args = gymutil.parse_arguments(
             "name": "--auto",
             "action": "store_true",
             "help": "그릇 앞까지 자동 접근한 뒤 키보드 미세조작으로 전환한다.",
+        },
+        {
+            "name": "--auto-grasp",
+            "action": "store_true",
+            "help": "성공 기록에서 추출한 자동 그릇 파지·상승을 실행한다.",
         }
     ],
 )
+if args.auto and args.auto_grasp:
+    raise ValueError("--auto와 --auto-grasp는 동시에 사용할 수 없습니다.")
 sp = gymapi.SimParams()
 sp.up_axis = gymapi.UP_AXIS_Z
 sp.gravity = gymapi.Vec3(0.0, 0.0, -9.81)
@@ -262,7 +272,7 @@ gripper rigid: True (fixed to A0509 link_6)
 gripper collision: {GRIPPER_COLLISION_SHAPES} explicit convex meshes
 table fixed: {table_opts.fix_base_link}
 table collision: explicit convex meshes (complete={COMPLETE_TABLE_COLLISION_SHAPES}, prepare={PREPARE_TABLE_COLLISION_SHAPES})
-robot grasp control: {"HYBRID (auto approach -> manual)" if args.auto else "MANUAL"}""")
+robot grasp control: {"RECORDED AUTO GRASP" if args.auto_grasp else ("HYBRID (auto approach -> manual)" if args.auto else "MANUAL")}""")
 
 # ============================================================ [4] 뷰어 + 키 등록
 viewer = gym.create_viewer(sim, gymapi.CameraProperties())
@@ -279,7 +289,22 @@ from stirfry_teleop_recorder import StirfryTeleopRecorder
 
 # --auto는 림 접촉 기준보다 180 mm 위의 안전 위치까지만 자동 이동한다.
 # 파지·상승·붓기는 실행하지 않고, 현재 자세를 TSC 키보드 조작기에 넘긴다.
-if args.auto:
+if args.auto_grasp:
+    from stirfry_recorded_grasp_sequence import StirfryRecordedGraspSequence
+
+    auto_sequence = StirfryRecordedGraspSequence(
+        gym,
+        sim,
+        env,
+        arm,
+        cook_bowl_handle,
+        base_z=BASE_Z,
+        dt=sp.dt,
+        slot_direction_xy=(-1.0, 0.0),
+    )
+    teleop = None
+    teleop_recorder = None
+elif args.auto:
     from stirfry_auto_sequence import StirfryAutoSequence
 
     auto_sequence = StirfryAutoSequence(
