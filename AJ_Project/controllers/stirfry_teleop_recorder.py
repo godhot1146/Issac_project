@@ -15,6 +15,9 @@ class StirfryTeleopRecorder:
     FORMAT_VERSION = 1
     MAX_SEGMENT_FRAMES = 30
     LIFT_THRESHOLD_M = 0.015
+    MAX_OUTPUT_PART_CHARS = 10000
+    # PART 머리말/꼬리말과 줄바꿈을 위한 보수적인 여유 공간.
+    OUTPUT_PART_OVERHEAD_CHARS = 256
 
     def __init__(
         self,
@@ -205,6 +208,63 @@ class StirfryTeleopRecorder:
             segments.append((start, len(self.samples) - 1))
         return segments
 
+    @classmethod
+    def _output_parts(cls, lines):
+        """TRACE 줄을 10,000자 이하의 복사 가능한 파트로 묶는다."""
+        payload_limit = (
+            cls.MAX_OUTPUT_PART_CHARS - cls.OUTPUT_PART_OVERHEAD_CHARS
+        )
+        parts = []
+        current = []
+        current_chars = 0
+        for line in lines:
+            line_chars = len(line) + 1  # 출력 줄바꿈 포함
+            if line_chars > payload_limit:
+                raise RuntimeError(
+                    "단일 TRACE 줄이 출력 파트 제한을 초과했습니다: "
+                    f"{line_chars} chars"
+                )
+            if current and current_chars + line_chars > payload_limit:
+                parts.append(current)
+                current = []
+                current_chars = 0
+            current.append(line)
+            current_chars += line_chars
+        if current:
+            parts.append(current)
+        return parts
+
+    @classmethod
+    def _print_output_parts(cls, lines):
+        parts = cls._output_parts(lines)
+        total = len(parts)
+        print(
+            f"\n[수동 궤적 기록] 총 {total}개 파트로 나눠 출력합니다. "
+            "각 PART의 BEGIN부터 END까지 한 파트씩 복사하세요.",
+            flush=True,
+        )
+        for index, part_lines in enumerate(parts, start=1):
+            begin = (
+                "===== STIRFRY_TELEOP_TRACE_PART "
+                f"{index}/{total} BEGIN ====="
+            )
+            end = (
+                "===== STIRFRY_TELEOP_TRACE_PART "
+                f"{index}/{total} END ====="
+            )
+            block = "\n".join([begin, *part_lines, end])
+            # print가 덧붙이는 마지막 줄바꿈까지 10,000자 제한에 포함한다.
+            if len(block) + 1 > cls.MAX_OUTPUT_PART_CHARS:
+                raise RuntimeError(
+                    f"TRACE PART {index}/{total}가 출력 제한을 초과했습니다: "
+                    f"{len(block) + 1} chars"
+                )
+            print(block, flush=True)
+            print(
+                f"[PART {index}/{total} 끝 — 위 블록을 복사하세요]",
+                flush=True,
+            )
+
     def finish(self, result):
         """기록을 멈추고 터미널 복사용 구조화 TRACE 블록을 출력한다."""
         if not self.active:
@@ -230,13 +290,13 @@ class StirfryTeleopRecorder:
             "lift_threshold_m": self.LIFT_THRESHOLD_M,
             "quaternion_order": "xyzw",
         }
-        print("\n===== STIRFRY_TELEOP_TRACE_BEGIN =====", flush=True)
-        print("TRACE_META " + json.dumps(meta, separators=(",", ":")), flush=True)
-        print(
+        output_lines = [
+            "TRACE_META " + json.dumps(meta, separators=(",", ":")),
             "TRACE_START "
-            + json.dumps(self._endpoint(self.samples[0]), separators=(",", ":")),
-            flush=True,
-        )
+            + json.dumps(
+                self._endpoint(self.samples[0]), separators=(",", ":")
+            ),
+        ]
         for sequence, (start, end) in enumerate(self._segments()):
             first = self.samples[start]
             last = self.samples[end]
@@ -251,9 +311,8 @@ class StirfryTeleopRecorder:
                 "start": self._endpoint(first),
                 "end": self._endpoint(last),
             }
-            print(
-                "TRACE_SEG " + json.dumps(segment, separators=(",", ":")),
-                flush=True,
+            output_lines.append(
+                "TRACE_SEG " + json.dumps(segment, separators=(",", ":"))
             )
         final = self.samples[-1]
         summary = {
@@ -268,12 +327,11 @@ class StirfryTeleopRecorder:
             ),
             "final": self._endpoint(final),
         }
-        print(
-            "TRACE_RESULT " + json.dumps(summary, separators=(",", ":")),
-            flush=True,
+        output_lines.append(
+            "TRACE_RESULT " + json.dumps(summary, separators=(",", ":"))
         )
-        print("===== STIRFRY_TELEOP_TRACE_END =====\n", flush=True)
+        self._print_output_parts(output_lines)
         print(
-            "[수동 궤적 기록 완료] 위 BEGIN부터 END까지 전부 복사해 전달하세요.",
+            "[수동 궤적 기록 완료] 모든 PART를 번호 순서대로 전달하세요.",
             flush=True,
         )
