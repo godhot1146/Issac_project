@@ -1,8 +1,9 @@
 """볶음 그릇 수동 파지 동작을 자동 시퀀스 분석용으로 기록한다.
 
-매 프레임 원본 상태는 메모리에 보존하고, 출력할 때 같은 키/접촉 상태가
-이어지는 프레임을 구간으로 압축한다. 출력된 TRACE 블록만 복사해도 TSC 목표,
-실제 관절/그리퍼 자세, 그릇 운동, 접촉 및 상승 시점을 재구성할 수 있다.
+키 입력 변화 시점과 5 Hz 주기 상태만 메모리에 보존하고, 출력할 때 같은
+키/접촉 상태가 이어지는 샘플을 구간으로 압축한다. 출력된 TRACE 블록만
+복사해도 TSC 목표, 실제 관절/그리퍼 자세, 그릇 자세, 접촉 및 상승 시점을
+재구성할 수 있다.
 """
 import json
 
@@ -12,8 +13,9 @@ from scipy.spatial.transform import Rotation
 
 
 class StirfryTeleopRecorder:
-    FORMAT_VERSION = 1
-    MAX_SEGMENT_FRAMES = 30
+    FORMAT_VERSION = 2
+    SAMPLE_RATE_HZ = 5.0
+    MAX_SEGMENT_SAMPLES = 30
     LIFT_THRESHOLD_M = 0.015
     MAX_OUTPUT_PART_CHARS = 10000
     # PART 머리말/꼬리말과 줄바꿈을 위한 보수적인 여유 공간.
@@ -37,6 +39,11 @@ class StirfryTeleopRecorder:
         self.dt = float(dt)
         self.samples = []
         self.active = True
+        self.frame = 0
+        self.sample_interval_frames = max(
+            1, int(round(1.0 / (self.dt * self.SAMPLE_RATE_HZ)))
+        )
+        self._last_input_signature = None
 
         arm_body_names = gym.get_actor_rigid_body_names(env, arm.actor)
         if gripper_body_name not in arm_body_names:
@@ -49,14 +56,15 @@ class StirfryTeleopRecorder:
             env, bowl_actor, 0, gymapi.DOMAIN_ENV
         )
 
-        bowl_state = self._body_state(bowl_actor, 0)
+        bowl_state = self._body_pose(bowl_actor, 0)
         self.initial_bowl_z = bowl_state["p"][2]
         print(
-            "[수동 궤적 기록 시작] 자동 접근 인계 자세를 frame=0으로 기록합니다. "
+            f"[수동 궤적 기록 시작] 저부하 {self.SAMPLE_RATE_HZ:.0f}Hz 기록을 "
+            "시작합니다. 키 입력 변화는 즉시 기록합니다. "
             "성공 후 ENTER를 누르면 복사용 TRACE 블록이 출력됩니다.",
             flush=True,
         )
-        self.record()
+        self.record(force=True)
 
     @staticmethod
     def _vec3(value):
@@ -75,82 +83,71 @@ class StirfryTeleopRecorder:
     def _rounded(values, digits=6):
         return [round(float(value), digits) for value in values]
 
-    def _body_state(self, actor, body_index):
+    def _body_pose(self, actor, body_index):
         states = self.gym.get_actor_rigid_body_states(
-            self.env, actor, gymapi.STATE_ALL
+            self.env, actor, gymapi.STATE_POS
         )
         state = states[body_index]
         return {
             "p": self._vec3(state["pose"]["p"]),
             "q": self._quat(state["pose"]["r"]),
-            "v": self._vec3(state["vel"]["linear"]),
-            "w": self._vec3(state["vel"]["angular"]),
         }
 
     def _contact_state(self):
         count = 0
-        impulse = 0.0
         for contact in self.gym.get_env_rigid_contacts(self.env):
             body0 = int(contact["body0"])
             body1 = int(contact["body1"])
             if {body0, body1} != {self.gripper_env_body, self.bowl_env_body}:
                 continue
             count += 1
-            names = getattr(getattr(contact, "dtype", None), "names", ()) or ()
-            if "lambda" in names:
-                impulse += abs(float(contact["lambda"]))
-        return count, impulse
+        return count
 
-    def _commanded_joints(self):
+    def _commanded_joints(self, actual_joints):
         if self.teleop.mode == "jsc":
             return np.asarray(self.teleop.joint_target, dtype=np.float64)
         if self.teleop.mode == "tsc" and self.arm._last_q is not None:
             return np.asarray(self.arm._last_q, dtype=np.float64)
-        return np.asarray(self.arm.current_joints(), dtype=np.float64)
+        return np.asarray(actual_joints, dtype=np.float64)
 
-    def record(self):
-        """시뮬레이션 fetch_results 이후 호출한다."""
+    def record(self, force=False):
+        """키 상태 변화 또는 5 Hz 주기에만 물리 상태를 읽어 기록한다."""
         if not self.active:
             return
 
-        gripper = self._body_state(self.arm.actor, self.gripper_body_index)
-        bowl = self._body_state(self.bowl_actor, 0)
-        contact_count, contact_impulse = self._contact_state()
+        input_signature = (self.teleop.mode, tuple(sorted(self.teleop.held)))
+        input_changed = input_signature != self._last_input_signature
+        periodic = self.frame % self.sample_interval_frames == 0
+        should_sample = bool(force or input_changed or periodic)
+        self._last_input_signature = input_signature
+        current_frame = self.frame
+        self.frame += 1
+        if not should_sample:
+            return
 
-        tcp_p, tcp_R = self.arm.current_pose()
+        gripper = self._body_pose(self.arm.actor, self.gripper_body_index)
+        bowl = self._body_pose(self.bowl_actor, 0)
+        contact_count = self._contact_state()
+        actual_joints = self.arm.current_joints()
         target_q = Rotation.from_matrix(self.teleop.ori_R).as_quat()
-        tcp_q = Rotation.from_matrix(tcp_R).as_quat()
-        gripper_R = Rotation.from_quat(gripper["q"]).as_matrix()
-        bowl_R = Rotation.from_quat(bowl["q"]).as_matrix()
-        bowl_in_gripper_p = gripper_R.T @ (
-            np.asarray(bowl["p"]) - np.asarray(gripper["p"])
-        )
-        bowl_in_gripper_q = Rotation.from_matrix(
-            gripper_R.T @ bowl_R
-        ).as_quat()
         lift_m = float(bowl["p"][2] - self.initial_bowl_z)
 
         self.samples.append(
             {
-                "frame": len(self.samples),
+                "frame": current_frame,
                 "mode": self.teleop.mode,
                 "held": sorted(self.teleop.held),
                 "target_p_base": self._rounded(self.teleop.cart_target),
                 "target_q_base_xyzw": self._rounded(target_q),
-                "q_cmd_rad": self._rounded(self._commanded_joints()),
-                "q_actual_rad": self._rounded(self.arm.current_joints()),
-                "tcp_actual_p_base": self._rounded(tcp_p),
-                "tcp_actual_q_base_xyzw": self._rounded(tcp_q),
+                "q_cmd_rad": self._rounded(
+                    self._commanded_joints(actual_joints)
+                ),
+                "q_actual_rad": self._rounded(actual_joints),
                 "gripper_p_world": self._rounded(gripper["p"]),
                 "gripper_q_world_xyzw": self._rounded(gripper["q"]),
                 "bowl_p_world": self._rounded(bowl["p"]),
                 "bowl_q_world_xyzw": self._rounded(bowl["q"]),
-                "bowl_v_world": self._rounded(bowl["v"]),
-                "bowl_w_world": self._rounded(bowl["w"]),
-                "bowl_p_gripper": self._rounded(bowl_in_gripper_p),
-                "bowl_q_gripper_xyzw": self._rounded(bowl_in_gripper_q),
                 "contact_count": contact_count,
-                "contact_impulse": round(contact_impulse, 6),
                 "lift_m": round(lift_m, 6),
                 "lifted": lift_m >= self.LIFT_THRESHOLD_M,
             }
@@ -172,18 +169,11 @@ class StirfryTeleopRecorder:
             "target_q_base_xyzw",
             "q_cmd_rad",
             "q_actual_rad",
-            "tcp_actual_p_base",
-            "tcp_actual_q_base_xyzw",
             "gripper_p_world",
             "gripper_q_world_xyzw",
             "bowl_p_world",
             "bowl_q_world_xyzw",
-            "bowl_v_world",
-            "bowl_w_world",
-            "bowl_p_gripper",
-            "bowl_q_gripper_xyzw",
             "contact_count",
-            "contact_impulse",
             "lift_m",
             "lifted",
         )
@@ -199,7 +189,7 @@ class StirfryTeleopRecorder:
                 self._signature(self.samples[index])
                 != self._signature(self.samples[index - 1])
             )
-            span_full = index - start >= self.MAX_SEGMENT_FRAMES
+            span_full = index - start >= self.MAX_SEGMENT_SAMPLES
             if signature_changed or span_full:
                 end = index - 1
                 segments.append((start, end))
@@ -279,8 +269,10 @@ class StirfryTeleopRecorder:
             "version": self.FORMAT_VERSION,
             "result": result,
             "dt_s": self.dt,
-            "frames": len(self.samples),
-            "duration_s": round((len(self.samples) - 1) * self.dt, 6),
+            "frames": self.frame,
+            "samples": len(self.samples),
+            "sample_rate_hz": self.SAMPLE_RATE_HZ,
+            "duration_s": round(max(0, self.frame - 1) * self.dt, 6),
             "cart_step_m_per_frame": float(self.teleop.cart_step),
             "ori_step_deg_per_frame": round(
                 float(np.rad2deg(self.teleop.ori_step)), 6
@@ -305,7 +297,9 @@ class StirfryTeleopRecorder:
                 "seq": sequence,
                 "f0": first["frame"],
                 "f1": last["frame"],
-                "duration_s": round((end - start) * self.dt, 6),
+                "duration_s": round(
+                    (last["frame"] - first["frame"]) * self.dt, 6
+                ),
                 "mode": first["mode"],
                 "held": first["held"],
                 "start": self._endpoint(first),

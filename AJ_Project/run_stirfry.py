@@ -349,12 +349,13 @@ while not gym.query_viewer_has_closed(viewer):
 
     gym.simulate(sim); gym.fetch_results(sim, True)
     if teleop_recorder is not None and teleop_recorder.active:
-        teleop_recorder.record()
+        teleop_recorder.record(force=success_requested)
         if success_requested:
             teleop_recorder.finish("user_marked_success")
     gym.step_graphics(sim); gym.draw_viewer(viewer, sim, True); gym.sync_frame_time(sim)
 
 if teleop_recorder is not None and teleop_recorder.active:
+    teleop_recorder.record(force=True)
     teleop_recorder.finish("viewer_closed_without_success_marker")
 gym.destroy_viewer(viewer)
 gym.destroy_sim(sim)
