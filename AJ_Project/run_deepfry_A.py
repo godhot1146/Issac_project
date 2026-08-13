@@ -322,7 +322,7 @@ fryer_opts.fix_base_link = True
 fryer_asset = gym.load_asset(
     sim,
     asset_root,
-    "urdf/deep_fryer/deep_fryer.urdf",
+    "urdf/Fryer/Fryer.urdf",
     fryer_opts
 )
 
@@ -353,7 +353,7 @@ gym.create_actor(
     env,
     fryer_asset,
     fryer_pose,
-    "deep_fryer",
+    "Fryer",
     0,
     0
 )
