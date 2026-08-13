@@ -119,6 +119,12 @@ comp_opts = gymapi.AssetOptions(); comp_opts.fix_base_link = True
 comp_asset = gym.load_asset(sim, asset_root, "urdf/air_compressor/air_compressor.urdf", comp_opts)
 gym.create_actor(env, comp_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, 0.02)), "air_compressor", 0, 0)
 
+# 미니 PC: 컴프레셔 반대편(스탠드 안쪽 캐비티, -y쪽으로 0.25m 띄움 — 컴프레셔 폭(±0.156m)과
+# 스탠드 안쪽 경계(±0.45m) 사이 여유 공간).
+mini_pc_opts = gymapi.AssetOptions(); mini_pc_opts.fix_base_link = True
+mini_pc_asset = gym.load_asset(sim, asset_root, "urdf/mini_pc/mini_pc.urdf", mini_pc_opts)
+gym.create_actor(env, mini_pc_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y - 0.25, 0.02)), "mini_pc", 0, 0)
+
 # ---- 구이 도면(AJ_4종(구이)_조리솔루션) 기준 배치 (그릴/완료/준비존은 방 경계 고정, 로봇과 무관) ----
 # 그릴러: 설치공간 경계의 왼쪽-상단(북서) 모서리에 딱 맞게 — 뒷면을 벽(ROOM_WALL_Y)에,
 # 왼쪽면을 경계 왼쪽(ROOM_X_MIN)에 붙임. 손잡이(로컬 y=-0.095~0)는 반경 안쪽으로 살짝 걸침.
@@ -168,7 +174,7 @@ def spawn_zone(center, name_prefix, basket_flip, table_rot=ROT270):
     gym.create_actor(env, rack_asset,
                       gymapi.Transform(p=gymapi.Vec3(cx - rack_off[0], cy - rack_off[1], TABLE_TOP_Z), r=table_rot),
                       f"{name_prefix}_rack", 0, 0)
-    bx = (cx + BASKET_LEN / 2 if basket_flip else cx - BASKET_LEN / 2) + (-0.2 if basket_flip else 0.2)
+    bx = (cx + BASKET_LEN / 2 if basket_flip else cx - BASKET_LEN / 2) + (-0.055 if basket_flip else 0.055)
     basket_rot = ROT180 if basket_flip else gymapi.Quat()  # gymapi.Quat() = identity(무회전)
     # 바스켓 2개: 랙 상판(RACK_TOP_Z) 위 3cm 띄워 떨어뜨림(이동체라 물리로 랙 홈에 안착).
     # 같은 basket_asset 템플릿을 dy만 바꿔 2번 create_actor → 이름은 유일해야 하므로 인덱스 붙임.
@@ -182,6 +188,13 @@ def spawn_zone(center, name_prefix, basket_flip, table_rot=ROT270):
 # 손잡이가 노치 가장자리에서 ~7~8cm 이내로 들어옴(반대 flip은 40cm+ 벌어짐).
 spawn_zone(DONE_CENTER, "done", basket_flip=False, table_rot=ROT90)
 spawn_zone(READY_CENTER, "ready", basket_flip=True)
+
+# 태블릿: 경계선(ROOM_*) 안, 로봇/작업대(남쪽 끝 y=-0.575)와 앞쪽 개방 경계(ROOM_FRONT_Y)
+# 사이 빈 공간의 정가운데 바닥에 배치. X는 방 중앙(0).
+tablet_opts = gymapi.AssetOptions(); tablet_opts.fix_base_link = True
+tablet_asset = gym.load_asset(sim, asset_root, "urdf/tablet/tablet.urdf", tablet_opts)
+TABLET_Y = (-0.575 + ROOM_FRONT_Y) / 2
+gym.create_actor(env, tablet_asset, gymapi.Transform(p=gymapi.Vec3(0.0, TABLET_Y, 0.0)), "tablet", 0, 0)
 
 # ============================================================ [3] 동역학 텐서(OSC)
 # 중요: 모든 create_actor(스폰)가 끝난 뒤에 prepare_sim 호출 → 이후엔 액터 추가 불가.
