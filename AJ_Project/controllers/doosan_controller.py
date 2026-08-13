@@ -106,8 +106,9 @@ class DoosanController:
         return sol[1:7].astype(np.float32), reached, err_mm
 
     def current_joints(self):
+        """팔 6관절 각도만 반환 (num_dofs>6이면 뒤에 붙은 그리퍼 등 추가 DOF는 제외)."""
         ds = self.gym.get_actor_dof_states(self.env, self.actor, gymapi.STATE_POS)
-        return np.array(ds["pos"], dtype=np.float32)
+        return np.array(ds["pos"], dtype=np.float32)[:6]
 
     def current_pose(self):
         """현재 손끝 (위치 3, 회전행렬 3x3)."""
@@ -124,10 +125,23 @@ class DoosanController:
 
     # ==================== JSC (관절공간) ====================
     def go_joints(self, q6):
-        """6관절 목표각 직접 설정 (위치제어)."""
+        """6관절 목표각 직접 설정 (위치제어). num_dofs>6(그리퍼 등 추가 DOF 용접)이면
+        나머지 DOF의 기존 목표값은 건드리지 않고 앞 6개(팔 관절)만 갱신한다."""
         self._set_position_mode()
-        self.gym.set_actor_dof_position_targets(self.env, self.actor,
-                                                np.asarray(q6, dtype=np.float32))
+        q6 = np.asarray(q6, dtype=np.float32)
+        if self.num_dofs > 6:
+            targets = self.gym.get_actor_dof_position_targets(self.env, self.actor).copy()
+            targets[:6] = q6
+        else:
+            targets = q6
+        self.gym.set_actor_dof_position_targets(self.env, self.actor, targets)
+
+    def set_extra_dof(self, dof_index, value):
+        """팔 6관절 이후에 용접된 추가 DOF(그리퍼 손가락 등) 목표값 설정.
+        go_joints가 건드리는 [0:6]과 겹치지 않게 read-modify-write."""
+        targets = self.gym.get_actor_dof_position_targets(self.env, self.actor).copy()
+        targets[dof_index] = value
+        self.gym.set_actor_dof_position_targets(self.env, self.actor, targets)
 
     # ==================== TSC (작업공간·IK) ====================
     def go_cartesian(self, target_xyz, target_R=None):
