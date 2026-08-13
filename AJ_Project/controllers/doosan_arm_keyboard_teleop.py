@@ -38,12 +38,19 @@ class DoosanArmKeyboardTeleop:
 
     def __init__(self, gym, viewer, arm, base_z=0.0,
                  cart_step=0.004, joint_step=0.01, ori_step_deg=1.5,
-                 settle=30, home_on_start=True):
+                 settle=30, home_on_start=True,
+                 extra_keymap=None, extra_continuous=None):
+        """extra_keymap/extra_continuous: 팔 이외의 추가 액추에이터(그리퍼 등)를 같은
+        키 이벤트 루프에 얹고 싶을 때 쓰는 확장 훅. extra_keymap={key: action_name}을
+        등록해두면 self.held에 눌림/뗌 상태가 그대로 쌓이니, 호출부가 handle_and_apply()
+        이후 self.held를 읽어 자기 액추에이터를 직접 구동하면 된다(이 클래스는 팔 6관절
+        외의 액션은 해석하지 않음 — _apply_held가 무시)."""
         self.gym, self.viewer, self.arm = gym, viewer, arm
         self.base_z = base_z
         self.cart_step = cart_step
         self.joint_step = joint_step
         self.ori_step = np.deg2rad(ori_step_deg)
+        self.extra_continuous = set(extra_continuous) if extra_continuous else set()
 
         self.keymap = {
             gymapi.KEY_1: "mode_jsc", gymapi.KEY_2: "mode_tsc", gymapi.KEY_3: "mode_osc",
@@ -57,6 +64,8 @@ class DoosanArmKeyboardTeleop:
             gymapi.KEY_U: "joint+",     gymapi.KEY_O: "joint-",
             gymapi.KEY_R: "home",
         }
+        if extra_keymap:
+            self.keymap.update(extra_keymap)
         for k, a in self.keymap.items():
             gym.subscribe_viewer_keyboard_event(viewer, k, a)
 
@@ -110,7 +119,7 @@ class DoosanArmKeyboardTeleop:
         """이벤트 처리 → 연속 동작 적용 → 모드별 제어 인가. 매 프레임 호출."""
         for e in self.gym.query_viewer_action_events(self.viewer):
             a = e.action
-            if a in _CONTINUOUS:                    # 연속: 눌림/뗌 상태만 추적
+            if a in _CONTINUOUS or a in self.extra_continuous:   # 연속: 눌림/뗌 상태만 추적
                 (self.held.add if e.value > 0 else self.held.discard)(a)
                 continue
             if e.value <= 0:                        # 단발: 눌릴 때만
@@ -144,10 +153,11 @@ class DoosanArmKeyboardTeleop:
                 self.cart_target[_AXIS[a[0]]] += self.cart_step if a[1] == "+" else -self.cart_step
             elif a in ("joint+", "joint-"):
                 self.joint_target[self.sel_joint] += self.joint_step if a[-1] == "+" else -self.joint_step
-            else:  # roll/pitch/yaw ±  (베이스 축 기준 회전)
+            elif a[:-1] in _ORI_AXIS:  # roll/pitch/yaw ±  (베이스 축 기준 회전)
                 axis = _ORI_AXIS[a[:-1]]
                 ang = self.ori_step if a[-1] == "+" else -self.ori_step
                 self.ori_R = R.from_euler(axis, ang).as_matrix() @ self.ori_R
+            # else: extra_continuous 액션(그리퍼 등) — 이 클래스는 해석 안 함, 호출부가 처리
         return True
 
     def _apply_control(self):

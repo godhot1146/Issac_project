@@ -27,10 +27,14 @@ from doosan_controller import DoosanController
 from asset_config import get_asset_root
 asset_root = get_asset_root()   # 컴퓨터마다 에셋 위치 자동 탐색/저장 (asset_config.py 참고)
 
-BASE_Z     = 0.81     # 팔 장착 높이(A0509_Stand 상판면)
+BASE_Z     = 0.805    # 팔 장착 높이(robot_cabinetnplate 상판면, a0509_stand 대체)
 CART_STEP  = 0.01     # 좌표 목표 이동 스텝(m)
 JOINT_STEP = 0.05     # 관절 이동 스텝(rad)
 HOME_Q     = np.array([0.0, 0.0, 1.2, 0.0, 1.0, 0.0], dtype=np.float32)
+
+# 그릴을 제외한 나머지(스탠드/팔/컴프레셔/컨트롤러/미니PC/완료·준비존/태블릿)를 통째로
+# 남쪽(-y)으로 50cm 이동. 그릴만 원래 위치 그대로 둔다.
+Y_SHIFT = -0.5
 
 # ---- 구이 도면(AJ_4종(구이)_조리솔루션) 기준 설치공간/설비 좌표 ----
 # 좌표계(로봇 베이스=원점 기준, 회전 전): +y=북(벽), -y=남(사람), +x=동(준비존), -x=서.
@@ -59,9 +63,10 @@ RACK_Y_MAX = 0.325   # 그릴러 손잡이(0.355)에서 3cm 여유 — 존 중�
 DONE_CENTER  = (ROOM_X_MIN + 0.3, RACK_Y_MAX - 0.45)   # 완료존 중심(work_table 기준): 서쪽 변
 READY_CENTER = (ROOM_X_MAX - 0.3, RACK_Y_MAX - 0.45)   # 준비존 중심(work_table 기준): 동쪽 변
 
-# 로봇(스탠드+팔+컴프레셔) 그룹 위치: A0509_Stand(0.6x0.9m)가 완료(-0.925~-0.325)/준비
-# (0.325~0.925) 작업대 사이 0.65m 틈에 안 겹치게 들어가는 자리는 사실상 중앙(X=0)뿐이라
-# (양쪽 여유 2.5cm) 오른쪽(그릴러 X중심 -0.175 → 0)으로 이동. Y는 기존과 동일.
+
+# 로봇(스탠드+팔+컴프레셔) 그룹 위치: robot_cabinetnplate(0.6x0.9m, 옛 a0509_stand와 동일 치수)가
+# 완료(-0.925~-0.325)/준비(0.325~0.925) 작업대 사이 0.65m 틈에 안 겹치게 들어가는 자리는
+# 사실상 중앙(X=0)뿐이라(양쪽 여유 2.5cm) 오른쪽(그릴러 X중심 -0.175 → 0)으로 이동. Y는 기존과 동일.
 RIG_X, RIG_Y = 0.0, READY_CENTER[1]
 
 # ============================================================ [1] 시뮬
@@ -102,36 +107,69 @@ env = gym.create_env(sim, gymapi.Vec3(-2.5, -2.5, 0), gymapi.Vec3(2.5, 2.5, 2), 
 #        · group  = 충돌 그룹(같은 값끼리만 충돌 계산),  filter = 비트마스크(끼리 충돌 제외)
 # 스탠드+팔+컴프레셔는 그릴/완료존/준비존 3곳에서 등거리인 RIG_X,RIG_Y로 이동 배치.
 stand_opts = gymapi.AssetOptions(); stand_opts.fix_base_link = True   # ① 바닥 고정 설비
-stand_asset = gym.load_asset(sim, asset_root, "urdf/a0509_stand/a0509_stand.urdf", stand_opts)  # ② 템플릿
-gym.create_actor(env, stand_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, 0)), "stand", 0, 0)  # ③ 배치
+stand_asset = gym.load_asset(sim, asset_root, "urdf/robot_cabinetnplate/robot_cabinetnplate.urdf", stand_opts)  # ② 템플릿
+gym.create_actor(env, stand_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y + Y_SHIFT, 0)), "stand", 0, 0)  # ③ 배치
+
+# robot_cabinetnplate.stl을 직접 파싱해 상판의 볼트 구멍 배치를 찾아보니(반경 3~4mm 원형
+# 구멍들, X는 -0.22/-0.075/0.075/0.22, Y는 약 0.15m 간격으로 -0.385~0.385 6열) 격자 형태의
+# 마운트 구멍판이었다. 캐비닛 중심(로컬 0,0)에서 북쪽(+y)으로 2칸(간격 0.15 x 2 = 0.3, 가장
+# 가까운 구멍 y=0.075에서 두 칸이면 y≈0.375 — 최북단 구멍 열과 거의 일치)만큼 띄운 자리로
+# 팔을 옮긴다. 캐비닛 자체는 그대로 중심에 두고 팔만 그 위에서 오프셋(ARM_Y_OFFSET).
+ARM_Y_OFFSET = 0.375
 
 # 팔은 DoosanController가 위 ①②③(load+create_actor)을 내부에서 대신 해줌 → 여기선 파라미터만 넘김.
-# 스탠드 상판(BASE_Z=0.81) 높이에 고정 장착. (OSC 동역학이 깔끔하도록 고정베이스 순수팔)
+# 스탠드 상판(BASE_Z=0.805) 높이에 고정 장착. (OSC 동역학이 깔끔하도록 고정베이스 순수팔)
+# urdf는 손목(link_6)에 two_finger_gripper를 용접한 결합 에셋 — ik_urdf로 순수 팔만 따로
+# 지정해야 IK/FK 체인에 그리퍼 DOF가 안 섞인다(DoosanController가 지원하는 파라미터).
 arm = DoosanController(
     gym, sim, env, asset_root,
-    urdf="urdf/doosan_a0509/a0509.urdf",
+    urdf="urdf/a0509_two_finger_gripper/a0509_two_finger_gripper.urdf",
+    ik_urdf="urdf/doosan_a0509/a0509.urdf",
+    ee_link="link_6",
     fix_base=True,
-    spawn_transform=gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, BASE_Z)),   # 팔 base_link를 상판 높이에
+    spawn_transform=gymapi.Transform(
+        p=gymapi.Vec3(RIG_X, RIG_Y + Y_SHIFT - 0.065+ ARM_Y_OFFSET, BASE_Z)),   # 팔 base_link를 상판의 북쪽 구멍 위치에
 )
+# two_finger_gripper.urdf의 joint limit과 동일: MIN=완전 열림(손가락 바깥면이 실제 슬라이드
+# 슬롯의 바깥쪽 벽 x=∓0.047에 닿음, 간격 22mm), MAX=완전 닫힘(간격 0mm)
+GRIPPER_MIN, GRIPPER_MAX = -0.010, 0.001
+GRIPPER_STEP = 0.0003                  # 프레임당 이동량(꾹 누르면 연속) — 스트로크가 짧아져 보폭 축소
 
-# 컴프레셔: 스탠드와 같은 XY에, 살짝 띄워(z=0.02) 배치. (①②③ 동일 패턴)
+# 컴프레셔/컨트롤러/미니PC: robot_cabinetnplate 내부 선반(z=0 바닥이 아니라 그 위 받침판 —
+# robot_cabinetnplate.stl을 직접 파싱해 수평면 면적을 z별로 집계해보니 진짜 바닥(z=0)은
+# 다리/받침대뿐인 얇은 면(<0.01㎡)이고, 실사용 선반은 link-frame z≈0.12에 있음(전체 발자국과
+# 거의 같은 0.95㎡). 그 선반 위 5mm 띄운 z=0.125를 목표 바닥 높이로 잡았다. 캐비닛 발자국은
+# x:±0.3, y:±0.45. air_compressor·doosan_controller 둘 다 원점이 바닥/중심 어디에도 안 맞는
+# 메쉬라(각 urdf 주석의 bbox 참고), 목표 위치(center_x, center_y, 선반 z=0.125)에서 로컬 bbox
+# 중심/최소값만큼 역산해 origin을 구했다.
+# 배치: 컴프레셔=+y쪽, 컨트롤러=-y쪽 (Y로 나란히, 사이 간격 ~3cm), 미니PC=컨트롤러 위에 적재.
 comp_opts = gymapi.AssetOptions(); comp_opts.fix_base_link = True
 comp_asset = gym.load_asset(sim, asset_root, "urdf/air_compressor/air_compressor.urdf", comp_opts)
-gym.create_actor(env, comp_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y, 0.02)), "air_compressor", 0, 0)
+gym.create_actor(env, comp_asset,
+                  gymapi.Transform(p=gymapi.Vec3(RIG_X - 0.229, RIG_Y + 0.131 + Y_SHIFT, 0.291)), "air_compressor", 0, 0)
 
-# 미니 PC: 컴프레셔 반대편(스탠드 안쪽 캐비티, -y쪽으로 0.25m 띄움 — 컴프레셔 폭(±0.156m)과
-# 스탠드 안쪽 경계(±0.45m) 사이 여유 공간).
+ctrl_opts = gymapi.AssetOptions(); ctrl_opts.fix_base_link = True
+ctrl_asset = gym.load_asset(sim, asset_root, "urdf/doosan_controller/doosan_controller.urdf", ctrl_opts)
+gym.create_actor(env, ctrl_asset,
+                  gymapi.Transform(p=gymapi.Vec3(RIG_X - 0.202, RIG_Y - 0.0825 + Y_SHIFT, 0.204)), "doosan_controller", 0, 0)
+
+# 미니 PC: 컨트롤러 상판(world z = 0.204 + 0.263 = 0.467) 위 5mm 띄워 적재. mini_pc 원점은
+# 바닥면 중심이라(mini_pc.urdf 주석) 목표 바닥 높이를 그대로 z에 넣으면 됨.
 mini_pc_opts = gymapi.AssetOptions(); mini_pc_opts.fix_base_link = True
 mini_pc_asset = gym.load_asset(sim, asset_root, "urdf/mini_pc/mini_pc.urdf", mini_pc_opts)
-gym.create_actor(env, mini_pc_asset, gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y - 0.25, 0.02)), "mini_pc", 0, 0)
+gym.create_actor(env, mini_pc_asset,
+                  gymapi.Transform(p=gymapi.Vec3(RIG_X, RIG_Y - 0.17 + Y_SHIFT, 0.472)), "mini_pc", 0, 0)
 
 # ---- 구이 도면(AJ_4종(구이)_조리솔루션) 기준 배치 (그릴/완료/준비존은 방 경계 고정, 로봇과 무관) ----
-# 그릴러: 설치공간 경계의 왼쪽-상단(북서) 모서리에 딱 맞게 — 뒷면을 벽(ROOM_WALL_Y)에,
-# 왼쪽면을 경계 왼쪽(ROOM_X_MIN)에 붙임. 손잡이(로컬 y=-0.095~0)는 반경 안쪽으로 살짝 걸침.
+# 그릴러: 방향 반대로(ROT180) — 원래 자리(북서 모서리, 뒷면=ROOM_WALL_Y/왼쪽면=ROOM_X_MIN)의
+# 같은 footprint를 유지한 채로만 뒤집는다. 메쉬 원점이 바닥 모서리(로컬 x:0~1.5,y:-0.095~0.6)라
+# 180도 회전하면 원점 기준 부호가 뒤집히므로, 새 origin = (ROOM_X_MIN+1.5, ROOM_WALL_Y-0.095)로
+# 보정해야 예전과 같은 자리에 남는다(spawn_zone의 table_off와 동일한 보정 원리).
+# 그릴은 Y_SHIFT 미적용 — 원래 위치 그대로 둔다.
 grill_opts = gymapi.AssetOptions(); grill_opts.fix_base_link = True   # 그릴=고정 설비
 grill_asset = gym.load_asset(sim, asset_root, "urdf/grill/grill.urdf", grill_opts)
 gym.create_actor(env, grill_asset,
-                  gymapi.Transform(p=gymapi.Vec3(ROOM_X_MIN, ROOM_WALL_Y - 0.6, 0.0)), "grill", 0, 0)
+                  gymapi.Transform(p=gymapi.Vec3(ROOM_X_MIN + 1.5, ROOM_WALL_Y - 0.095, 0.0), r=ROT180), "grill", 0, 0)
 
 # 여기선 템플릿(asset)만 미리 로드해두고, 실제 배치(create_actor)는 아래 spawn_zone()이 존마다 반복.
 #   → 같은 템플릿 하나로 완료존/준비존에 여러 번 찍는 게 load_asset/create_actor 분리의 이점.
@@ -160,6 +198,7 @@ def spawn_zone(center, name_prefix, basket_flip, table_rot=ROT270):
     같은 자리(footprint)에서 180도 반대 방향을 보도록 spawn 오프셋만 바뀐다
     (ROT270: table(0.3,-0.45)/rack(0.0215,0), ROT90: table(-0.3,0.45)/rack(-0.0215,0))."""
     cx, cy = center
+    cy += Y_SHIFT   # 그릴 제외 나머지와 함께 남쪽(-y)으로 50cm 이동
     # 회전(r=table_rot)을 주면 메쉬 원점이 회전축이 되어 위치가 틀어지므로, 그만큼 spawn p를
     # 오프셋(table_off/rack_off)해서 '같은 footprint 안'에 놓이게 보정한다(회전+평행이동 조합).
     if table_rot is ROT270:
@@ -183,18 +222,18 @@ def spawn_zone(center, name_prefix, basket_flip, table_rot=ROT270):
             p=gymapi.Vec3(bx, cy + dy, RACK_TOP_Z + 0.03), r=basket_rot),
             f"{name_prefix}_basket_{i}", 0, 0)
 
-# 바스켓 손잡이(힌지+레버, 삼각형 면적분석으로 로컬 x=0.42~0.51 구간에 있음 확인)가 랙 테두리
-# 홈 쪽으로 오도록 flip 지정 — 완료(서쪽 노치)는 flip=True, 준비(동쪽 노치)는 flip=False일 때
-# 손잡이가 노치 가장자리에서 ~7~8cm 이내로 들어옴(반대 flip은 40cm+ 벌어짐).
-spawn_zone(DONE_CENTER, "done", basket_flip=False, table_rot=ROT90)
-spawn_zone(READY_CENTER, "ready", basket_flip=True)
+# 선반(work_table)+랙(grill_rack)+바스켓 2개를 두 존 다 180도 반대로 돌림 — table_rot과
+# basket_flip은 항상 짝으로 바꿔야 같은 자리(footprint)에서 반대 방향을 보면서, 바스켓
+# 손잡이도 랙 테두리 홈 자리에 그대로 걸린다(마운트만 180도 돌고 홈 위치는 유지됨).
+spawn_zone(DONE_CENTER, "done", basket_flip=True, table_rot=ROT270)
+spawn_zone(READY_CENTER, "ready", basket_flip=False, table_rot=ROT90)
 
 # 태블릿: 경계선(ROOM_*) 안, 로봇/작업대(남쪽 끝 y=-0.575)와 앞쪽 개방 경계(ROOM_FRONT_Y)
 # 사이 빈 공간의 정가운데 바닥에 배치. X는 방 중앙(0).
 tablet_opts = gymapi.AssetOptions(); tablet_opts.fix_base_link = True
 tablet_asset = gym.load_asset(sim, asset_root, "urdf/tablet/tablet.urdf", tablet_opts)
 TABLET_Y = (-0.575 + ROOM_FRONT_Y) / 2
-gym.create_actor(env, tablet_asset, gymapi.Transform(p=gymapi.Vec3(0.0, TABLET_Y, 0.0)), "tablet", 0, 0)
+gym.create_actor(env, tablet_asset, gymapi.Transform(p=gymapi.Vec3(0.0, TABLET_Y + Y_SHIFT, 0.0)), "tablet", 0, 0)
 
 # ============================================================ [3] 동역학 텐서(OSC)
 # 중요: 모든 create_actor(스폰)가 끝난 뒤에 prepare_sim 호출 → 이후엔 액터 추가 불가.
@@ -216,12 +255,41 @@ ROOM_LINES = np.array([
 ROOM_COLORS = np.array([[1.0, 1.0, 0.0]] * 4, dtype=np.float32)
 
 # 키보드 텔레오프 (JSC/TSC/OSC, 꾹 누르면 연속, TSC 자세 유지) — controllers/keyboard_teleop.py
+# 그리퍼는 이제 팔 손목(link_6)에 용접된 같은 액터(arm.actor)의 DOF 6,7번 — N/M을
+# extra_keymap으로 얹어서 같은 이벤트 루프를 쓰고, teleop.held에 눌림 상태가 쌓이면
+# 아래 루프에서 arm.set_extra_dof()로 그 두 DOF만 민다(팔 6관절은 안 건드림).
 from doosan_arm_keyboard_teleop import DoosanArmKeyboardTeleop
-teleop = DoosanArmKeyboardTeleop(gym, viewer, arm, base_z=BASE_Z)
+teleop = DoosanArmKeyboardTeleop(
+    gym, viewer, arm, base_z=BASE_Z,
+    extra_keymap={gymapi.KEY_N: "grip_close", gymapi.KEY_M: "grip_open"},
+    extra_continuous={"grip_close", "grip_open"},
+)
+print("[그리퍼] N: 닫기(꾹)   M: 열기(꾹)")
+
+arm_dof_dict = gym.get_actor_dof_dict(env, arm.actor)
+GRIPPER_L_IDX = arm_dof_dict["gripper_left_finger_joint"]
+GRIPPER_R_IDX = arm_dof_dict["gripper_right_finger_joint"]
+gripper_pos = GRIPPER_MIN
+
+# DoosanController._set_position_mode()가 이미 arm.actor의 전체 DOF(팔6+그리퍼2)를
+# 위치제어(PD)로 켜뒀지만, stiffness/damping은 팔 기준(600/50)이라 훨씬 가벼운 손가락에는
+# 과함 — 그리퍼 두 DOF만 골라 가벼운 게인(200/20)으로 다시 낮춘다.
+gp = gym.get_actor_dof_properties(env, arm.actor)
+gp["stiffness"][GRIPPER_L_IDX] = gp["stiffness"][GRIPPER_R_IDX] = 200.0
+gp["damping"][GRIPPER_L_IDX] = gp["damping"][GRIPPER_R_IDX] = 20.0
+gym.set_actor_dof_properties(env, arm.actor, gp)
 
 step = 0
 while not gym.query_viewer_has_closed(viewer):
     teleop.handle_and_apply()   # 이벤트 처리 + 연속동작 + 모드별 제어
+
+    if "grip_close" in teleop.held or "grip_open" in teleop.held:
+        if "grip_close" in teleop.held:
+            gripper_pos = min(GRIPPER_MAX, gripper_pos + GRIPPER_STEP)
+        if "grip_open" in teleop.held:
+            gripper_pos = max(GRIPPER_MIN, gripper_pos - GRIPPER_STEP)
+        arm.set_extra_dof(GRIPPER_L_IDX, gripper_pos)
+        arm.set_extra_dof(GRIPPER_R_IDX, gripper_pos)
 
     gym.simulate(sim); gym.fetch_results(sim, True)
     gym.step_graphics(sim)
