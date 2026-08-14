@@ -48,9 +48,12 @@ BASE_Z = CABINET_HEIGHT
 ROBOT_CABINET_POS = (-0.300, 0.000, 0.0)
 ROBOT_CABINET_YAW_DEG = 90.0
 
-# 통로를 없애고 Bonitkit 서쪽 면을 로봇에서 0.5865 m까지 당긴다.
-# side table 동쪽 끝과 Bonitkit 사이의 X 간격은 11.5 mm다.
-BONITKIT_POS = (1.000, 0.000, 0.0)
+# 통로를 없애고 Bonitkit 개방면이 서쪽(-X)의 로봇을 향하도록 -90 deg
+# 회전한다. 회전 뒤 X 방향 폭은 0.935 m이며 메쉬 원점의 y 오프셋까지 보정한
+# actor 원점 x=1.0615 m를 사용한다. 개방면의 서쪽 끝은 로봇에서 0.5865 m,
+# side table과의 X 간격은 11.5 mm다.
+BONITKIT_POS = (1.0615, 0.000, 0.0)
+BONITKIT_YAW_DEG = -90.0
 
 # 북/서/남 모두 같은 0.30 x 1.15 x 0.90 m 테이블을 사용한다.
 # 세 테이블 중심은 로봇에서 같은 0.735 m 반경에 둬 대응 그릇 거리를
@@ -238,7 +241,14 @@ bowl_opts.fix_base_link = False
 bowl_opts.disable_gravity = False
 bowl_asset = gym.load_asset(sim, asset_root, BOWL_URDF, bowl_opts)
 
-gym.create_actor(env, bonitkit_asset, pose(*BONITKIT_POS), "bonitkit", 0, 0)
+gym.create_actor(
+    env,
+    bonitkit_asset,
+    pose(*BONITKIT_POS, yaw_deg=BONITKIT_YAW_DEG),
+    "bonitkit",
+    0,
+    0,
+)
 table_handles = []
 bowl_handles = []
 cook_bowl_handle = None
